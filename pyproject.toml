@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nuluca-modeling"
+version = "0.3.0"
+description = "Member-side nuLUCA modeling tools for local coding agents"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27,<1", "mcp>=1.25,<2"]
+
+[project.optional-dependencies]
+test = ["build>=1.2,<2", "pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
+
+[project.scripts]
+nuluca-modeling = "nuluca_modeling_connect.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nuluca_modeling_connect"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/nuluca_modeling_connect",
+  "/pyproject.toml",
+  "/README.md",
+]
