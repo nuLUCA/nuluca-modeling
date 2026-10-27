@@ -4,6 +4,7 @@ import hashlib
 import json
 import zipfile
 
+import httpx
 import pytest
 from nuluca_modeling_connect import setup as installer
 
@@ -25,6 +26,8 @@ def release(tmp_path):
 def home(monkeypatch, tmp_path):
     monkeypatch.setattr(installer, "_home", lambda: tmp_path / "home")
     monkeypatch.setattr(installer, "_libraries_dir", lambda: tmp_path / "libraries")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home" / ".codex"))
+    monkeypatch.delenv("NULUCA_AGENT_CONNECT_URL", raising=False)
 
 
 def test_setup_upgrades_clients_without_printing_key_and_uninstall_removes_owned_files(tmp_path, monkeypatch):
@@ -81,12 +84,59 @@ def test_default_setup_uses_member_download_and_refuses_a_mismatched_archive(tmp
     archive = release(tmp_path)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     calls = []
-    monkeypatch.setattr(installer, "_member_release", lambda key: ("https://storage.example.test/plugin.zip", digest))
+    monkeypatch.setattr(installer, "_member_release", lambda key, **kwargs: ("https://storage.example.test/plugin.zip", digest))
     monkeypatch.setattr(installer, "_read_source", lambda source: calls.append(source) or archive.read_bytes())
 
     installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("codex",)))
     assert calls == ["https://storage.example.test/plugin.zip"]
 
-    monkeypatch.setattr(installer, "_member_release", lambda key: ("https://storage.example.test/plugin.zip", "0" * 64))
+    monkeypatch.setattr(installer, "_member_release", lambda key, **kwargs: ("https://storage.example.test/plugin.zip", "0" * 64))
     with pytest.raises(installer.SetupError, match="checksum"):
         installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("codex",)))
+
+
+@pytest.mark.parametrize("override, expected", [
+    (None, "https://nuluca-backend-production.up.railway.app"),
+    ("https://nuluca-backend-staging.up.railway.app/", "https://nuluca-backend-staging.up.railway.app"),
+])
+def test_download_and_both_clients_use_the_same_selected_service(tmp_path, monkeypatch, override, expected):
+    home(monkeypatch, tmp_path)
+    if override is not None:
+        monkeypatch.setenv("NULUCA_AGENT_CONNECT_URL", override)
+    archive = release(tmp_path)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={
+            "archive_url": "https://storage.example.test/plugin.zip",
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        })
+
+    client_type = httpx.Client
+    monkeypatch.setattr(installer.httpx, "Client", lambda **kwargs: client_type(
+        transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(installer, "_read_source", lambda source: archive.read_bytes())
+    result = installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("claude", "codex")))
+
+    assert len(calls) == 1
+    assert str(calls[0].url) == f"{expected}/v1/agent-connect/nuluca/member-downloads/jsontogh/{installer._platform()}"
+    assert calls[0].headers["X-API-Key"] == "ae_test_secret"
+    claude = json.loads((tmp_path / "home" / ".claude.json").read_text())
+    assert claude["mcpServers"]["nuluca-modeling"]["env"]["NULUCA_AGENT_CONNECT_URL"] == expected
+    codex = (tmp_path / "home" / ".codex" / "config.toml").read_text()
+    assert f'NULUCA_AGENT_CONNECT_URL = "{expected}"' in codex
+    assert "ae_test_secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("url", [
+    "http://example.test", "https://example.test/path", "https://example.test?key=hidden",
+    "https://example.test#fragment", "https://user:password@example.test", "https://[invalid",
+])
+def test_setup_rejects_unsafe_service_before_download_or_config_changes(tmp_path, monkeypatch, url):
+    home(monkeypatch, tmp_path)
+    monkeypatch.setenv("NULUCA_AGENT_CONNECT_URL", url)
+    monkeypatch.setattr(installer, "_member_release", lambda *args, **kwargs: pytest.fail("download attempted"))
+    with pytest.raises(installer.SetupError, match="setup service"):
+        installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("claude", "codex")))
+    assert not (tmp_path / "home").exists()

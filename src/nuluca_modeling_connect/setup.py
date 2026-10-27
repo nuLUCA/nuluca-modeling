@@ -18,7 +18,7 @@ import httpx
 
 PLUGIN_NAME = "nuluca-modeling"
 PLUGIN_FILES = ("JsonToGH_Fresh.gha", "Newtonsoft.Json.dll")
-DEFAULT_URL = "https://nuluca-backend-staging.up.railway.app"
+DEFAULT_URL = "https://nuluca-backend-production.up.railway.app"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -106,15 +106,24 @@ def _read_source(source: str) -> bytes:
     return path.read_bytes()
 
 
-def _member_release(key: str) -> tuple[str, str]:
-    """Obtain a short-lived artifact URL from nuLUCA without putting the key in it."""
-    origin = urlsplit(DEFAULT_URL)
-    if origin.scheme != "https" or not origin.netloc or origin.username or origin.password:
+def _service_url() -> str:
+    value = (os.environ.get("NULUCA_AGENT_CONNECT_URL") or DEFAULT_URL).rstrip("/")
+    try:
+        origin = urlsplit(value)
+    except ValueError as exc:
+        raise SetupError("The nuLUCA setup service is unavailable.") from exc
+    if (origin.scheme != "https" or not origin.netloc or origin.username or origin.password
+            or origin.path or origin.query or origin.fragment):
         raise SetupError("The nuLUCA setup service is unavailable.")
+    return value
+
+
+def _member_release(key: str, *, base_url: str) -> tuple[str, str]:
+    """Obtain a short-lived artifact URL from nuLUCA without putting the key in it."""
     try:
         with httpx.Client(timeout=20, follow_redirects=False, trust_env=False,
                           headers={"X-API-Key": key, "Accept": "application/json"}) as client:
-            response = client.get(f"{DEFAULT_URL}/v1/agent-connect/nuluca/member-downloads/jsontogh/{_platform()}")
+            response = client.get(f"{base_url}/v1/agent-connect/nuluca/member-downloads/jsontogh/{_platform()}")
         if response.is_redirect or response.status_code != 200:
             raise SetupError("The member plugin download was unavailable.")
         body = response.json()
@@ -222,13 +231,13 @@ def _copy_plugin(files: dict[str, bytes], *, dry_run: bool, state: dict) -> tupl
     return result, restore
 
 
-def _claude_entry(key: str) -> dict:
+def _claude_entry(key: str, *, base_url: str) -> dict:
     return {"command": "nuluca-modeling", "args": ["serve"], "env": {
-        "NULUCA_AGENT_CONNECT_URL": DEFAULT_URL, "NULUCA_AGENT_CONNECT_KEY": key,
+        "NULUCA_AGENT_CONNECT_URL": base_url, "NULUCA_AGENT_CONNECT_KEY": key,
     }}
 
 
-def _configure_claude(key: str, *, dry_run: bool) -> Path:
+def _configure_claude(key: str, *, base_url: str, dry_run: bool) -> Path:
     path = _claude_config()
     try:
         document = json.loads(path.read_text()) if path.exists() else {}
@@ -239,7 +248,7 @@ def _configure_claude(key: str, *, dry_run: bool) -> Path:
     servers = document.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise SetupError("Claude Code MCP configuration could not be updated safely.")
-    servers[PLUGIN_NAME] = _claude_entry(key)
+    servers[PLUGIN_NAME] = _claude_entry(key, base_url=base_url)
     if not dry_run:
         _atomic_write(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
     return path
@@ -249,7 +258,7 @@ def _toml(value: str) -> str:
     return json.dumps(value)
 
 
-def _configure_codex(key: str, *, dry_run: bool) -> Path:
+def _configure_codex(key: str, *, base_url: str, dry_run: bool) -> Path:
     path = _codex_config()
     existing = path.read_text() if path.exists() else ""
     # A server table continues until the next table. Remove this exact server and
@@ -262,7 +271,7 @@ def _configure_codex(key: str, *, dry_run: bool) -> Path:
         'args = ["serve"]',
         "",
         "[mcp_servers.nuluca-modeling.env]",
-        f"NULUCA_AGENT_CONNECT_URL = {_toml(DEFAULT_URL)}",
+        f"NULUCA_AGENT_CONNECT_URL = {_toml(base_url)}",
         f"NULUCA_AGENT_CONNECT_KEY = {_toml(key)}",
         "",
     ))
@@ -285,6 +294,7 @@ def _load_state() -> dict:
 def setup(options: SetupOptions) -> dict:
     if not options.key.startswith(("ae_test_", "ae_live_")):
         raise SetupError("A nuLUCA Modeling key is required in NULUCA_AGENT_CONNECT_KEY.")
+    base_url = _service_url()
     state = _load_state()
     if options.source:
         expected = _published_digest(options.source, options.checksums)
@@ -292,13 +302,15 @@ def setup(options: SetupOptions) -> dict:
     else:
         if options.checksums:
             raise SetupError("--checksums-source requires --plugin-source.")
-        source, expected = _member_release(options.key)
+        source, expected = _member_release(options.key, base_url=base_url)
         payload = _read_source(source)
     plugin_files = _safe_archive(payload, expected)
     plugin_paths, restore = _copy_plugin(plugin_files, dry_run=options.dry_run, state=state)
     configs: dict[str, str] = {}
     for client in options.clients:
-        path = _configure_claude(options.key, dry_run=options.dry_run) if client == "claude" else _configure_codex(options.key, dry_run=options.dry_run)
+        path = (_configure_claude(options.key, base_url=base_url, dry_run=options.dry_run)
+                if client == "claude" else
+                _configure_codex(options.key, base_url=base_url, dry_run=options.dry_run))
         configs[client] = str(path)
     if not options.dry_run:
         _atomic_write(_state_file(), json.dumps({"plugin_paths": plugin_paths, "plugin_restore": restore,
