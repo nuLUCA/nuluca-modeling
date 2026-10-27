@@ -41,7 +41,7 @@ jobs:
       - name: Build the wheel and source distribution
         run: python -m build
       - name: Verify import boundary and inspected archive membership
-        run: python -m pytest -q tests/test_client.py tests/test_distribution.py
+        run: python -m pytest -q tests
       - name: Record inspected artifact members
         run: |
           python - <<'PY'
