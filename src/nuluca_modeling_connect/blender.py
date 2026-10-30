@@ -114,7 +114,7 @@ _AUTHOR_TOOLS = [
     {"name": "blender_run",
      "description": "Run a Python script from the modeling work folder in a new background Blender. This executes "
                     "code on the member's machine. The script's first argument is its artifacts folder, followed "
-                    "by inputs and args. Show the member a script you did not write before running it.",
+                    "by inputs and args. Never run a script from someone else unless the member has seen it.",
      "annotations": {"title": "Run Python in Blender", "readOnlyHint": False, "destructiveHint": True,
                      "openWorldHint": False},
      "inputSchema": _schema({"script": _FILE,
@@ -194,11 +194,12 @@ class _Run:
 
 class BlenderTools:
     def __init__(self, *, root: Path | None = None, env: dict | None = None, finder=discover,
-                 read_memory=memory.commit_percent) -> None:
+                 read_memory=memory.commit_percent, audit: Path | None = None) -> None:
         self.env = dict(os.environ if env is None else env)
         self.root = (root or Path(self.env.get("NULUCA_MODELING_WORK_ROOT", "~/nuluca-modeling/work"))).expanduser().resolve()
         self.finder = finder
         self.read_memory = read_memory
+        self.audit = audit or Path.home() / ".nuluca-modeling-connect" / "blender-runs.jsonl"
         self._found: dict | None = None
         self._lock = threading.Lock()
         self._active: _Run | None = None
@@ -311,6 +312,8 @@ class BlenderTools:
         if not receipt["commit_gate"]["ok"]:
             self._finish(run, "halted_commit_gate", None)
             return
+        if run.kind == "script":
+            self._record_run(run)
         self._write_receipt(run)
         job = memory.ProcessMemoryJob(run.limit_gb)
         log = (folder / "process.log").open("w")
@@ -539,6 +542,18 @@ class BlenderTools:
         path.write_text(source, encoding="utf-8")
         return {"file": self._relative(path), "bytes": path.stat().st_size, "sha256": _sha(path)}
 
+    def _record_run(self, run: _Run) -> None:
+        """Keep a local record of what ran with no prompt, outside the folder scripts can write to. No source."""
+        receipt = run.receipt
+        entry = {"at": _now(), "run": run.id, "file": receipt["script"], "sha256": receipt["source_sha256"],
+                 "dependencies": receipt["dependencies"]}
+        try:
+            self.audit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with self.audit.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            raise BlenderError("The run could not be recorded, so it did not start.") from exc
+
     def _run_script(self, args: dict) -> dict:
         script = self._existing(args.get("script"), (".py",))
         inputs = args.get("inputs") or []
@@ -554,9 +569,10 @@ class BlenderTools:
                                _MAX_MEMORY_GB)
         record = {"script": self._relative(script), "dependencies": [
             {"path": self._relative(item), "sha256": _sha(item), "bytes": item.stat().st_size} for item in files]}
+        wait = self._wait_time(args)
         run = self._start("script", script.read_bytes(), [*(str(item) for item in files), *extra],
                           timeout=timeout, limit_gb=ceiling, extra=record)
-        run.done.wait(self._wait_time(args))
+        run.done.wait(wait)
         return self._report(run)
 
     def _cancel(self, args: dict) -> dict:

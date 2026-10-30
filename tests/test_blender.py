@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 import pytest
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 
 import nuluca_modeling_connect
@@ -58,7 +60,8 @@ def tools(tmp_path: Path, binary: Path, **kwargs) -> BlenderTools:
     env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "NULUCA_BLENDER_PATH": str(binary),
            "NULUCA_AGENT_CONNECT_KEY": "ae_secret_for_test", "OPENAI_API_KEY": "sk-secret-for-test",
            **kwargs.pop("env", {})}
-    return BlenderTools(root=tmp_path / "work", env=env, read_memory=lambda: 10.0, **kwargs)
+    return BlenderTools(root=tmp_path / "work", env=env, read_memory=lambda: 10.0, audit=tmp_path / "audit.jsonl",
+                        **kwargs)
 
 
 def write_script(work: BlenderTools, source: str = "print('hello')\n") -> str:
@@ -373,6 +376,40 @@ async def test_case_names_become_safe_distinct_files(tmp_path, cases):
         await work.call("blender_vary", {"file": "a.blend", "object": "M", "cases": cases})
 
 
+@pytest.mark.asyncio
+@posix_only
+async def test_each_run_leaves_an_audit_record_without_source(tmp_path):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    source = "secret_design_rule = 42\n"
+    report = await work.call("blender_run", {"script": write_script(work, source)})
+    entry = json.loads((tmp_path / "audit.jsonl").read_text())
+    assert entry["run"] == report["run"] and entry["file"] == "model.py"
+    assert entry["sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    assert "secret_design_rule" not in (tmp_path / "audit.jsonl").read_text()
+
+
+@pytest.mark.asyncio
+@posix_only
+async def test_a_run_that_cannot_be_recorded_does_not_start(tmp_path):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    (tmp_path / "audit.jsonl").mkdir()
+    with pytest.raises(BlenderError, match="did not start"):
+        await work.call("blender_run", {"script": write_script(work)})
+    assert not list(work.root.glob("blender-runs/*/child-env.txt"))
+    assert (await work.call("blender_status", {}))["active_run"] is None
+
+
+def test_setup_offer_says_blender_needs_both_permissions():
+    assert "blender_run" in member_setup.APPROVAL_CHOICE and "needs both" in member_setup.APPROVAL_CHOICE
+    assert "blender-runs.jsonl" in member_setup.SCRIPT_ALWAYS_ON
+
+
+def test_guide_never_tells_the_agent_to_wait():
+    guide = (PACKAGE / "blender_guide.md").read_text()
+    assert "never stop to wait" in guide and "--always-allow-scripts" in guide
+    assert "Ask for a design language" not in guide
+
+
 def test_standing_tool_permission_still_prompts_for_blender_run(tmp_path, monkeypatch):
     settings, config = tmp_path / "settings.json", tmp_path / "config.toml"
     monkeypatch.setattr(member_setup, "_claude_settings", lambda: settings)
@@ -643,7 +680,8 @@ while True:
 @pytest.mark.asyncio
 async def test_real_blender_loop(tmp_path):
     work = BlenderTools(root=tmp_path / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER,
-                                                     "NULUCA_AGENT_CONNECT_KEY": "ae_secret_for_test"})
+                                                     "NULUCA_AGENT_CONNECT_KEY": "ae_secret_for_test"},
+                        audit=tmp_path / "audit.jsonl")
     status = await work.call("blender_status", {})
     assert status["selected"]["support"] in {"tested", "untested"}
     await work.call("blender_write", {"file": "screen.py", "source": MODEL})
@@ -699,7 +737,8 @@ async def test_real_blender_guard_refuses_ordinary_escapes(tmp_path, monkeypatch
     home.mkdir()
     (home / "secret.txt").write_text("private")
     monkeypatch.setattr(Path, "home", classmethod(lambda _: home))
-    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER})
+    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER},
+                        audit=tmp_path / "audit.jsonl")
     await work.call("blender_write", {"file": "hostile.py", "source": HOSTILE})
     report = await work.call("blender_run", {"script": "hostile.py"})
     assert report["status"] == "process_completed", report.get("log_tail")
@@ -745,7 +784,8 @@ async def test_real_blender_guard_details(tmp_path, monkeypatch):
     home.mkdir()
     (home / "secret.txt").write_text("private")
     monkeypatch.setattr(Path, "home", classmethod(lambda _: home))
-    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER})
+    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER},
+                        audit=tmp_path / "audit.jsonl")
     await work.call("blender_write", {"file": "details.py", "source": GUARD_DETAILS})
     report = await work.call("blender_run", {"script": "details.py"})
     assert report["status"] == "process_completed", report.get("log_tail")
@@ -807,7 +847,8 @@ async def test_real_blender_handles_saved_scene_settings(tmp_path, monkeypatch):
     home = tmp_path / "member"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda _: home))
-    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER})
+    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER},
+                        audit=tmp_path / "audit.jsonl")
     await work.call("blender_write", {"file": "tricky.py", "source": TRICKY_FILES})
     built = await work.call("blender_run", {"script": "tricky.py"})
     assert built["status"] == "process_completed", built.get("log_tail")
@@ -830,6 +871,31 @@ async def test_real_blender_handles_saved_scene_settings(tmp_path, monkeypatch):
     assert exported["result"]["readback"]["bounds_m"][1][0] == pytest.approx(0.001, abs=1e-6)
 
 
+SERVER_ENTRY = "from nuluca_modeling_connect.server import main; main()"
+
+
+@needs_blender
+@pytest.mark.asyncio
+async def test_real_blender_over_mcp_stdio(tmp_path):
+    """The server as a client starts it, with no cloud key: tool list, a run, and a preview image."""
+    parameters = StdioServerParameters(command=sys.executable, args=["-B", "-c", SERVER_ENTRY],
+                                       env={"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+                                            "NULUCA_MODELING_BASELINE": "1", "NULUCA_BLENDER_PATH": REAL_BLENDER,
+                                            "NULUCA_MODELING_WORK_ROOT": str(tmp_path / "work")})
+    async with stdio_client(parameters) as streams, ClientSession(*streams) as session:
+        await session.initialize()
+        names = {tool.name for tool in (await session.list_tools()).tools}
+        assert {"blender_status", "blender_run", "blender_preview"} <= names
+        await session.call_tool("blender_write", {"file": "screen.py", "source": MODEL})
+        built = await session.call_tool("blender_run", {"script": "screen.py"})
+        report = json.loads(built.content[0].text)
+        assert report["status"] == "process_completed", report
+        blend = next(item["path"] for item in report["artifacts"] if item["path"].endswith(".blend"))
+        shown = await session.call_tool("blender_preview", {"file": blend, "width": 320, "height": 240})
+        assert [item.type for item in shown.content] == ["text", "image"]
+    assert (tmp_path / ".nuluca-modeling-connect" / "blender-runs.jsonl").is_file()
+
+
 @needs_blender
 def test_real_blender_leaves_when_the_server_dies(tmp_path):
     """A child left behind by a crashed server exits on its own."""
@@ -839,7 +905,8 @@ import asyncio, os, sys
 from pathlib import Path
 from nuluca_modeling_connect.blender import BlenderTools
 async def main():
-    work = BlenderTools(root=Path({str(tmp_path / "work")!r}), env={{**os.environ, "NULUCA_BLENDER_PATH": {REAL_BLENDER!r}}})
+    work = BlenderTools(root=Path({str(tmp_path / "work")!r}), env={{**os.environ, "NULUCA_BLENDER_PATH": {REAL_BLENDER!r}}},
+                        audit=Path({str(tmp_path / "audit.jsonl")!r}))
     await work.call("blender_write", {{"file": "spin.py", "source": {SPIN!r}}})
     report = await work.call("blender_run", {{"script": "spin.py", "wait_seconds": 0}})
     print(work._runs[report["run"]].process.pid, flush=True)

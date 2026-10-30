@@ -43,10 +43,11 @@ CLAUDE_SERVER_RULE = f"mcp__{PLUGIN_NAME}"
 CLAUDE_SCRIPT_RULES = tuple(f"{CLAUDE_SERVER_RULE}__{tool}" for tool in SCRIPT_TOOLS)
 APPROVAL_CHOICE = ("Ask the member once whether to work with no client prompts while they are away. "
                    "--always-allow-tools covers every nuLUCA tool except script imports and blender_run, and "
-                   "--always-allow-scripts covers those two. Both last across sessions, and the --no- forms remove them.")
-SCRIPT_ALWAYS_ON = ("The client will not ask before script imports, so show the member the scripts in any definition "
-                    "from someone else and get their approval yourself. Script imports are recorded in "
-                    "~/.nuluca-modeling-connect/script-imports.jsonl.")
+                   "--always-allow-scripts covers those two. Blender models are built with blender_run, so unattended "
+                   "Blender work needs both. Both last across sessions, and the --no- forms remove them.")
+SCRIPT_ALWAYS_ON = ("The client will not ask before script imports or blender_run, so show the member any script "
+                    "from someone else and get their approval yourself. Both are recorded in "
+                    "~/.nuluca-modeling-connect (script-imports.jsonl and blender-runs.jsonl).")
 _CODEX_TABLES = r"(?ms)^\[mcp_servers\.nuluca-modeling(?:\.[^\]\n]+)?\]\n.*?(?=^\[|\Z)"
 RESTART_STEP = ("Ask the member to save their work and restart Rhino themselves. Never quit, kill or "
                 "relaunch their Rhino. After they restart it, call nuluca_status.")

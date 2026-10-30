@@ -126,10 +126,15 @@ call does not happen. `claude -p` and Codex with `approval_policy = "never"` bot
 refuse such a call. For modeling while the member is away, ask them about both
 options.
 
+Blender models are built with `blender_run`, so unattended Blender work needs both
+permissions.
+
 With `--always-allow-scripts` on, the client stops asking, so your duty to show the
 member the scripts in someone else's definition is the only remaining check. Each
 script import is recorded in `~/.nuluca-modeling-connect/script-imports.jsonl` with
-the time, file, hash and component names. The record holds no source.
+the time, file, hash and component names. Each `blender_run` is recorded in
+`blender-runs.jsonl` beside it with the time, run, script and hash. The records hold
+no source.
 
 ## Blender
 
