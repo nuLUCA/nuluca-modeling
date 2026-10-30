@@ -38,11 +38,14 @@ CONFIGURED_CLIENTS = ("claude", "codex")
 # Any other MCP client: setup changes no client file and returns the stdio entry.
 OTHER_CLIENT = "other"
 SCRIPT_TOOL = "canvas_import_scripts"
-CLAUDE_SCRIPT_RULE = f"mcp__{PLUGIN_NAME}__{SCRIPT_TOOL}"
-SCRIPT_CHOICE = ("The client asks before each script import. Ask the member whether they want that, or always allow, "
-                 "which lasts across sessions. To always allow, run setup again with --always-allow-scripts.")
+CLAUDE_SERVER_RULE = f"mcp__{PLUGIN_NAME}"
+CLAUDE_SCRIPT_RULE = f"{CLAUDE_SERVER_RULE}__{SCRIPT_TOOL}"
+APPROVAL_CHOICE = ("Ask the member once whether to work with no client prompts while they are away. "
+                   "--always-allow-tools covers every nuLUCA tool except script imports, and --always-allow-scripts "
+                   "covers script imports. Both last across sessions, and the --no- forms remove them.")
 SCRIPT_ALWAYS_ON = ("The client will not ask before script imports, so show the member the scripts in any definition "
-                    "from someone else and get their approval yourself.")
+                    "from someone else and get their approval yourself. Script imports are recorded in "
+                    "~/.nuluca-modeling-connect/script-imports.jsonl.")
 _CODEX_TABLES = r"(?ms)^\[mcp_servers\.nuluca-modeling(?:\.[^\]\n]+)?\]\n.*?(?=^\[|\Z)"
 RESTART_STEP = ("Ask the member to save their work and restart Rhino themselves. Never quit, kill or "
                 "relaunch their Rhino. After they restart it, call nuluca_status.")
@@ -63,6 +66,7 @@ class SetupOptions:
     environment: str | None = None
     package_spec: str | None = None
     always_allow_scripts: bool | None = None
+    always_allow_tools: bool | None = None
 
 
 def _home() -> Path:
@@ -378,24 +382,35 @@ def _check_pinned_archive(payload: bytes, *, base_url: str) -> list[str]:
     return []
 
 
-def _set_claude_script_rule(allowed: bool, *, dry_run: bool) -> None:
-    """Add or remove the one permission rule, leaving the member's other settings as they are."""
+def _set_claude_rules(*, allow_tools: bool, allow_scripts: bool, dry_run: bool) -> None:
+    """Set the standing rules, leaving the member's other settings as they are.
+
+    A server-wide allow also covers the script tool, and an ask rule outranks an
+    allow, so standing tool permission keeps the script prompt unless both are chosen.
+    """
     path = _claude_settings()
     try:
         document = json.loads(path.read_text()) if path.exists() else {}
         permissions = document.setdefault("permissions", {})
-        rules = permissions.setdefault("allow", [])
-        if not isinstance(rules, list):
+        allow = permissions.setdefault("allow", [])
+        ask = permissions.setdefault("ask", [])
+        if not isinstance(allow, list) or not isinstance(ask, list):
             raise ValueError
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         raise SetupError("Claude Code settings could not be read safely.") from exc
-    if (CLAUDE_SCRIPT_RULE in rules) == allowed:
-        return
-    if allowed:
-        rules.append(CLAUDE_SCRIPT_RULE)
-    else:
-        rules.remove(CLAUDE_SCRIPT_RULE)
-    if not dry_run:
+    wanted = {CLAUDE_SERVER_RULE: allow_tools, CLAUDE_SCRIPT_RULE: allow_scripts}
+    changed = False
+    for rule, present in wanted.items():
+        if (rule in allow) != present:
+            allow.append(rule) if present else allow.remove(rule)
+            changed = True
+    ask_for_scripts = allow_tools and not allow_scripts
+    if (CLAUDE_SCRIPT_RULE in ask) != ask_for_scripts:
+        ask.append(CLAUDE_SCRIPT_RULE) if ask_for_scripts else ask.remove(CLAUDE_SCRIPT_RULE)
+        changed = True
+    if not ask:
+        del permissions["ask"]
+    if changed and not dry_run:
         _atomic_write(path, json.dumps(document, indent=2) + "\n")
 
 
@@ -426,8 +441,8 @@ def _toml(value: str) -> str:
     return json.dumps(value)
 
 
-def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, always_allow_scripts: bool,
-                     dry_run: bool) -> Path:
+def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, always_allow_tools: bool,
+                     always_allow_scripts: bool, dry_run: bool) -> Path:
     path = _codex_config()
     existing = path.read_text() if path.exists() else ""
     # A server table continues until the next table. Remove this exact server and
@@ -437,13 +452,14 @@ def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, 
         "[mcp_servers.nuluca-modeling]",
         f"command = {_toml(command)}",
         f"args = {json.dumps(args)}",
+        *(['default_tools_approval_mode = "approve"'] if always_allow_tools else []),
         "",
         "[mcp_servers.nuluca-modeling.env]",
         f"NULUCA_AGENT_CONNECT_URL = {_toml(base_url)}",
         f"NULUCA_AGENT_CONNECT_KEY = {_toml(key)}",
         "",
         f"[mcp_servers.nuluca-modeling.tools.{SCRIPT_TOOL}]",
-        f'approval_mode = "{"approve" if always_allow_scripts else "prompt"}"',
+        f'approval_mode = "{"approve" if always_allow_scripts else "prompt"}"',  # outranks the server default
         "",
     ))
     if not dry_run:
@@ -481,25 +497,29 @@ def setup(options: SetupOptions) -> dict:
     plugin_files = _safe_archive(payload, expected)
     plugin_paths, restore, notes = _copy_plugin(plugin_files, dry_run=options.dry_run, state=state)
     notes = [*pin_notes, *notes]
-    always_allow = (state.get("always_allow_scripts") is True if options.always_allow_scripts is None
-                    else options.always_allow_scripts)
+    allow_scripts = (state.get("always_allow_scripts") is True if options.always_allow_scripts is None
+                     else options.always_allow_scripts)
+    allow_tools = (state.get("always_allow_tools") is True if options.always_allow_tools is None
+                   else options.always_allow_tools)
     configs: dict[str, str] = {}
     for client in options.clients:
         if client == "claude":
             path = _configure_claude(options.key, command, args, base_url=base_url, dry_run=options.dry_run)
-            _set_claude_script_rule(always_allow, dry_run=options.dry_run)
+            _set_claude_rules(allow_tools=allow_tools, allow_scripts=allow_scripts, dry_run=options.dry_run)
             configs[client] = str(path)
         elif client == "codex":
             path = _configure_codex(options.key, command, args, base_url=base_url,
-                                    always_allow_scripts=always_allow, dry_run=options.dry_run)
+                                    always_allow_tools=allow_tools, always_allow_scripts=allow_scripts,
+                                    dry_run=options.dry_run)
             configs[client] = str(path)
     if not options.dry_run:
         _atomic_write(_state_file(), json.dumps({"plugin_paths": plugin_paths, "plugin_restore": restore,
                                                   "clients": list(options.clients),
-                                                  "always_allow_scripts": always_allow}, indent=2) + "\n")
+                                                  "always_allow_tools": allow_tools,
+                                                  "always_allow_scripts": allow_scripts}, indent=2) + "\n")
     result = {"service": base_url, "plugin": plugin_paths, "clients": configs, "restart": RESTART_STEP,
-              "script_tool": {"tool": SCRIPT_TOOL, "always_allow": always_allow,
-                              "next_step": SCRIPT_ALWAYS_ON if always_allow else SCRIPT_CHOICE}}
+              "approvals": {"always_allow_tools": allow_tools, "always_allow_scripts": allow_scripts,
+                            "next_step": SCRIPT_ALWAYS_ON if allow_scripts else APPROVAL_CHOICE}}
     if notes:
         result["notes"] = notes
     if OTHER_CLIENT in options.clients:
@@ -540,7 +560,7 @@ def uninstall(*, dry_run: bool = False) -> dict:
                     content = json.dumps(document, indent=2, sort_keys=True) + "\n"
             except ValueError:
                 raise SetupError("Claude Code configuration could not be read safely.")
-            _set_claude_script_rule(False, dry_run=dry_run)
+            _set_claude_rules(allow_tools=False, allow_scripts=False, dry_run=dry_run)
         else:
             content = re.sub(_CODEX_TABLES, "", content).strip() + "\n"
         if not dry_run:

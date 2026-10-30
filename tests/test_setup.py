@@ -441,8 +441,9 @@ def test_clients_ask_before_script_imports_by_default(tmp_path, monkeypatch):
 
     assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
     assert not (tmp_path / "home/.claude/settings.json").exists()
-    assert result["script_tool"]["always_allow"] is False
-    assert "--always-allow-scripts" in result["script_tool"]["next_step"]
+    assert result["approvals"] == {"always_allow_tools": False, "always_allow_scripts": False,
+                                   "next_step": installer.APPROVAL_CHOICE}
+    assert "default_tools_approval_mode" not in codex_table(tmp_path)
 
 
 def test_always_allow_is_the_member_choice_and_lasts_across_setup_runs(tmp_path, monkeypatch):
@@ -457,7 +458,7 @@ def test_always_allow_is_the_member_choice_and_lasts_across_setup_runs(tmp_path,
     assert json.loads(settings.read_text())["permissions"]["allow"] == ["Bash(ls)", "mcp__nuluca-modeling__canvas_import_scripts"]
     assert json.loads(settings.read_text())["theme"] == "dark"
     assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
-    assert "get their approval" in result["script_tool"]["next_step"]
+    assert "get their approval" in result["approvals"]["next_step"]
 
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients))
     assert "mcp__nuluca-modeling__canvas_import_scripts" in json.loads(settings.read_text())["permissions"]["allow"]
@@ -474,10 +475,11 @@ def test_uninstall_removes_always_allow_and_every_codex_table(tmp_path, monkeypa
     codex.write_text('[mcp_servers.other]\ncommand = "x"\n')
     settings = tmp_path / "home/.claude/settings.json"
     installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude", "codex"),
-                                           always_allow_scripts=True))
+                                           always_allow_scripts=True, always_allow_tools=True))
     installer.uninstall()
 
     assert json.loads(settings.read_text())["permissions"]["allow"] == []
+    assert "ask" not in json.loads(settings.read_text())["permissions"]
     assert "nuluca-modeling" not in codex.read_text()
     assert "[mcp_servers.other]" in codex.read_text()
 
@@ -491,3 +493,29 @@ def test_unreadable_claude_settings_stop_setup_rather_than_being_replaced(tmp_pa
         installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude",),
                                                always_allow_scripts=True))
     assert settings.read_text() == "{not json"
+
+
+def test_unattended_tools_keep_the_script_prompt_until_it_is_chosen_too(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = str(release(tmp_path))
+    settings = tmp_path / "home/.claude/settings.json"
+    clients = ("claude", "codex")
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_tools=True))
+    rules = json.loads(settings.read_text())["permissions"]
+    assert rules["allow"] == ["mcp__nuluca-modeling"]
+    assert rules["ask"] == ["mcp__nuluca-modeling__canvas_import_scripts"]
+    table = codex_table(tmp_path)
+    assert table["default_tools_approval_mode"] == "approve"
+    assert table["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=True))
+    rules = json.loads(settings.read_text())["permissions"]
+    assert "ask" not in rules
+    assert set(rules["allow"]) == {"mcp__nuluca-modeling", "mcp__nuluca-modeling__canvas_import_scripts"}
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_tools=False,
+                                           always_allow_scripts=False))
+    assert json.loads(settings.read_text())["permissions"]["allow"] == []
+    assert "default_tools_approval_mode" not in codex_table(tmp_path)

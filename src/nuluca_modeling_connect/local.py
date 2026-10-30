@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .bridge import BridgeClient, BridgeError
@@ -116,8 +118,10 @@ def script_report(definition: dict) -> dict:
 
 
 class LocalTools:
-    def __init__(self, bridge: BridgeClient | None = None, *, root: Path | None = None) -> None:
+    def __init__(self, bridge: BridgeClient | None = None, *, root: Path | None = None,
+                 audit: Path | None = None) -> None:
         self.bridge = bridge or BridgeClient()
+        self.audit = audit or Path.home() / ".nuluca-modeling-connect" / "script-imports.jsonl"
         self.root = (root or Path(os.environ.get("NULUCA_MODELING_WORK_ROOT", "~/nuluca-modeling/work"))).expanduser().resolve()
 
     def _file(self, value: object, suffix: str) -> Path:
@@ -139,6 +143,17 @@ class LocalTools:
         if not isinstance(definition, dict):
             raise BridgeError("The definition must be a JSON object.")
         return definition
+
+    def _record_script_import(self, name: str, definition: dict, scripts: dict) -> None:
+        """Keep a local record of what ran with no prompt. It holds names and a hash, never source."""
+        body = json.dumps(definition, sort_keys=True).encode()
+        entry = {"at": datetime.now(UTC).isoformat(), "file": name, "sha256": hashlib.sha256(body).hexdigest(), **scripts}
+        try:
+            self.audit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with self.audit.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            raise BridgeError("The script import could not be recorded, so it did not run.") from exc
 
     async def _preflight(self, definition: dict) -> dict:
         scripts = script_report(definition)
@@ -170,6 +185,8 @@ class LocalTools:
                 if objects:
                     return {"success": False, "warning": "canvas_not_empty", "object_count": objects,
                             "message": _NOT_EMPTY}
+            if name == "canvas_import_scripts":
+                self._record_script_import(args["file"], definition, scripts)
             return await self.bridge.call("POST", "/import", body=definition,
                                           query={"clear": "false" if add else "true"})
         if name == "canvas_export":

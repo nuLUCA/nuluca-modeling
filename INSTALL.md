@@ -55,7 +55,7 @@ credential entry.
 | Option | Effect |
 |---|---|
 | `--client claude`, `--client codex` | Configure only the named client |
-| `--always-allow-scripts` | Let `canvas_import_scripts` run with no client prompt; see Code execution |
+| `--always-allow-tools`, `--always-allow-scripts` | Standing permissions; see Unattended work |
 | `--dry-run` | Show what would change |
 | `--uninstall` | Remove what setup added and restore what it replaced |
 | `--plugin-source` | Install from a local or HTTPS archive; a checksum is still required |
@@ -101,18 +101,29 @@ ask first. Tell the member what the scripts do. For a definition from someone el
 such as a shared model or a downloaded `.gh`, show the member what the scripts do
 and get their approval before importing it.
 
-The member can choose always allow, which lasts across sessions. Ask them, and offer
-the choice only if they want it. For Claude Code and Codex, run setup again with
-`--always-allow-scripts`. `--no-always-allow-scripts` turns it off.
+## Unattended work
+
+Ask the member once whether you may work while they are away. Client prompts stop
+unattended work, so setup offers two standing permissions. Each lasts across
+sessions, and the `--no-` form or `--uninstall` removes it.
+
+| Option | Effect |
+|---|---|
+| `--always-allow-tools` | Every nuLUCA tool runs with no client prompt, except script imports |
+| `--always-allow-scripts` | `canvas_import_scripts` runs with no client prompt |
 
 | Client | What setup writes |
 |---|---|
-| Claude Code | `mcp__nuluca-modeling__canvas_import_scripts` in `permissions.allow` in `~/.claude/settings.json` |
-| Codex | `approval_mode = "approve"` under `[mcp_servers.nuluca-modeling.tools.canvas_import_scripts]`; `"prompt"` otherwise |
-| Other clients | Use that client's own approval setting for `canvas_import_scripts` |
+| Claude Code | Rules in `permissions.allow`, and `permissions.ask` while scripts still prompt, in `~/.claude/settings.json` |
+| Codex | `default_tools_approval_mode` for the server, and `approval_mode` for `canvas_import_scripts`, in `config.toml` |
+| Other clients | Use that client's own approval setting |
 
-With always allow on, the client stops asking, so your duty to show the member the
-scripts in someone else's definition is the only remaining check.
+With `--always-allow-scripts` on, the client stops asking, so your duty to show the
+member the scripts in someone else's definition is the only remaining check. Each
+script import is recorded in `~/.nuluca-modeling-connect/script-imports.jsonl` with
+the time, file, hash and component names. The record holds no source.
+
+## Off switch
 
 Agent code execution is on by default, and `nuluca_status` reports it as
 `exec_enabled`. To turn it off, the member writes `false` to

@@ -97,7 +97,8 @@ def canvas(tmp_path, *, status=None, routes=None):
         response = (routes or {}).get(request.url.path)
         return response or httpx.Response(200, json={"success": True, "errors": []})
 
-    return LocalTools(BridgeClient(root=tmp_path, transport=httpx.MockTransport(reply)), root=work), requests
+    return (LocalTools(BridgeClient(root=tmp_path, transport=httpx.MockTransport(reply)), root=work,
+                       audit=tmp_path / "audit" / "script-imports.jsonl"), requests)
 
 
 @pytest.mark.asyncio
@@ -248,3 +249,26 @@ async def test_preflight_reports_scripts_even_on_an_older_plugin(tmp_path):
     result = await local.call("canvas_preflight", {"file": "scripted.json"})
     assert result["error"] == "preflight_unavailable"
     assert result["script_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_script_imports_leave_a_record_with_names_and_no_source(tmp_path):
+    local, _ = canvas(tmp_path)
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+    await local.call("canvas_import_scripts", {"file": "scripted.json"})
+
+    entry = json.loads((tmp_path / "audit" / "script-imports.jsonl").read_text())
+    assert entry["file"] == "scripted.json"
+    assert entry["script_count"] == 3
+    assert len(entry["sha256"]) == 64
+    assert "Print(1)" not in json.dumps(entry)
+
+
+@pytest.mark.asyncio
+async def test_a_script_import_that_cannot_be_recorded_does_not_run(tmp_path):
+    local, requests = canvas(tmp_path)
+    (tmp_path / "audit").write_text("a file where the folder belongs")
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+    with pytest.raises(BridgeError, match="could not be recorded"):
+        await local.call("canvas_import_scripts", {"file": "scripted.json", "replace_canvas": True})
+    assert all(request.url.path != "/import" for request in requests)
