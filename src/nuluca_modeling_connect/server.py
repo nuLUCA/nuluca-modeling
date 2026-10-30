@@ -11,8 +11,9 @@ from importlib.metadata import version
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import ImageContent, TextContent, Tool
 
+from .blender import BlenderTools, blender_tools
 from .bridge import BridgeError
 from .client import CloudClient, ConnectError
 from .local import LocalTools, local_tools
@@ -21,12 +22,14 @@ from .workbench import Workbench, workbench_tools
 
 
 def make_server(client: CloudClient | None, local: LocalTools | None = None,
-                workbench: Workbench | None = None) -> Server:
+                workbench: Workbench | None = None, blender: BlenderTools | None = None) -> Server:
     server = Server("nuluca-modeling")
     local = local or LocalTools()
     local_by_name = {item["name"]: item for item in local_tools()}
     workbench = workbench or Workbench(client)
     workbench_by_name = {item["name"]: item for item in workbench_tools()}
+    blender = blender or BlenderTools()
+    blender_by_name = {item["name"]: item for item in blender_tools()}
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -36,10 +39,11 @@ def make_server(client: CloudClient | None, local: LocalTools | None = None,
         ) for item in (await client.discover() if client is not None else [])]
         status = Tool(name="nuluca_status", description="Check this nuLUCA connection and local Rhino bridge.",
                       inputSchema={"type": "object", "properties": {}})
-        return [status] + cloud + [Tool(**item) for item in (*local_by_name.values(), *workbench_by_name.values())]
+        return [status] + cloud + [Tool(**item) for item in (*local_by_name.values(), *workbench_by_name.values(),
+                                                             *blender_by_name.values())]
 
     @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def call_tool(name: str, arguments: dict) -> list[TextContent | ImageContent]:
         try:
             if name == "nuluca_status":
                 granted = ([item["mcp_tool_name"] for item in await client.discover()]
@@ -52,24 +56,30 @@ def make_server(client: CloudClient | None, local: LocalTools | None = None,
                 result = await local.call(name, arguments)
             elif name in workbench_by_name:
                 result = await workbench.call(name, arguments)
+            elif name in blender_by_name:
+                result = await blender.call(name, arguments)
             else:
                 if client is None:
                     raise ConnectError("This local baseline has no cloud tools.")
                 result = await client.call(name, arguments)
         except (ConnectError, BridgeError) as exc:
             result = {"error": {"code": str(exc)}}
-        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+        images = [ImageContent(type="image", mimeType="image/png", data=item)
+                  for item in result.pop("_images", [])]
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False)), *images]
 
     return server
 
 
 async def _run() -> None:
     client = None if os.environ.get("NULUCA_MODELING_BASELINE") == "1" else CloudClient()
-    server = make_server(client)
+    blender = BlenderTools()
+    server = make_server(client, blender=blender)
     try:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
     finally:
+        await asyncio.to_thread(blender.close)
         if client is not None:
             await client.close()
 

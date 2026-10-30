@@ -94,6 +94,8 @@ async def test_redirect_does_not_forward_member_key():
 def test_wheel_source_imports_no_platform_modules_or_database_drivers():
     source = Path(__file__).resolve().parents[1] / "src" / "nuluca_modeling_connect"
     forbidden = ("app", "mcp_servers", "neo4j", "azure", "cosmos", "sqlalchemy", "subprocess")
+    # Only the Blender launcher and its helpers may start a process, and only Blender itself.
+    process_allowed = {"blender.py", "blender_discovery.py", "blender_memory.py"}
     for path in source.glob("*.py"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -103,7 +105,8 @@ def test_wheel_source_imports_no_platform_modules_or_database_drivers():
                 names = [node.module or ""]
             else:
                 continue
-            assert all(not name.startswith(forbidden) for name in names), (path, names)
+            blocked = tuple(item for item in forbidden if item != "subprocess" or path.name not in process_allowed)
+            assert all(not name.startswith(blocked) for name in names), (path, names)
 
 
 def test_key_and_host_are_required():
