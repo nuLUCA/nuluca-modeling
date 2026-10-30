@@ -84,6 +84,8 @@ def main() -> None:
                         help="Client to configure. Use other for any different MCP client: setup prints its entry")
     parser.add_argument("--environment", choices=list(SERVICES),
                         help="nuLUCA service to use (default production, or NULUCA_AGENT_CONNECT_URL)")
+    parser.add_argument("--always-allow-scripts", action=argparse.BooleanOptionalAction, default=None,
+                        help="Let canvas_import_scripts run with no client prompt, across sessions")
     parser.add_argument("--package-spec", help="Package path or URL the client should start instead of PyPI")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
@@ -100,7 +102,8 @@ def main() -> None:
                 result = setup(SetupOptions(source=args.plugin_source, checksums=args.checksums_source,
                                             key=key, clients=tuple(args.clients or detected_clients()),
                                             dry_run=args.dry_run, environment=args.environment,
-                                            package_spec=args.package_spec))
+                                            package_spec=args.package_spec,
+                                            always_allow_scripts=args.always_allow_scripts))
         except (SetupError, OSError) as exc:
             print(f"nuluca-modeling setup: {exc}", file=sys.stderr)
             sys.exit(1)

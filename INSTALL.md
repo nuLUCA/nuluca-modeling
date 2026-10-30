@@ -43,8 +43,8 @@ $env:NULUCA_AGENT_CONNECT_KEY = [System.Net.NetworkCredential]::new('', $key).Pa
 uvx nuluca-modeling setup --environment staging
 ```
 
-Setup downloads the plugin for this computer, checks its SHA-256 checksum,
-copies it into Grasshopper's Libraries folder and registers the MCP server. It
+Setup downloads the plugin for this computer, checks it against the hashes pinned
+in this release of `nuluca-modeling`, copies it into Grasshopper's Libraries folder and registers the MCP server. It
 configures Claude Code and Codex when it finds them.
 
 Any other MCP client: add `--client other`. Setup changes no client files and
@@ -55,6 +55,7 @@ credential entry.
 | Option | Effect |
 |---|---|
 | `--client claude`, `--client codex` | Configure only the named client |
+| `--always-allow-scripts` | Let `canvas_import_scripts` run with no client prompt; see Code execution |
 | `--dry-run` | Show what would change |
 | `--uninstall` | Remove what setup added and restore what it replaced |
 | `--plugin-source` | Install from a local or HTTPS archive; a checksum is still required |
@@ -92,12 +93,26 @@ Definitions can run code, as any Grasshopper file with script components can. Rh
 runs with the member's full rights, outside Claude Code's permission prompts and the
 Codex sandbox, so a script can reach things the agent itself is held back from.
 
-`canvas_import` stops at a definition that carries scripts, returns their count and
-component names, and changes nothing until you repeat it with `allow_scripts`. It
-also stops at a cluster body it cannot read, because one can hold scripts. Tell the
-member what the scripts do. For a definition from someone else, such as a shared
-model or a downloaded `.gh`, show the member what the scripts do and get their
-approval before importing it.
+`canvas_import` takes definitions with no scripts. For a definition that carries
+scripts, or a cluster body it cannot read, it returns `definition_has_scripts` with
+the count and component names, and changes nothing. Import those with
+`canvas_import_scripts`, which is a separate tool so that the member's client can
+ask first. Tell the member what the scripts do. For a definition from someone else,
+such as a shared model or a downloaded `.gh`, show the member what the scripts do
+and get their approval before importing it.
+
+The member can choose always allow, which lasts across sessions. Ask them, and offer
+the choice only if they want it. For Claude Code and Codex, run setup again with
+`--always-allow-scripts`. `--no-always-allow-scripts` turns it off.
+
+| Client | What setup writes |
+|---|---|
+| Claude Code | `mcp__nuluca-modeling__canvas_import_scripts` in `permissions.allow` in `~/.claude/settings.json` |
+| Codex | `approval_mode = "approve"` under `[mcp_servers.nuluca-modeling.tools.canvas_import_scripts]`; `"prompt"` otherwise |
+| Other clients | Use that client's own approval setting for `canvas_import_scripts` |
+
+With always allow on, the client stops asking, so your duty to show the member the
+scripts in someone else's definition is the only remaining check.
 
 Agent code execution is on by default, and `nuluca_status` reports it as
 `exec_enabled`. To turn it off, the member writes `false` to

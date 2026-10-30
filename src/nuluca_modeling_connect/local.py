@@ -32,7 +32,8 @@ _WRITE = {
     "viewport_set_display_mode": "/set-display-mode",
     "dialog_dismiss": "/dismiss-dialog",
 }
-_FILE = {"canvas_preflight", "canvas_import", "canvas_export", "canvas_save", "viewport_screenshot"}
+_FILE = {"canvas_preflight", "canvas_import", "canvas_import_scripts", "canvas_export", "canvas_save",
+         "viewport_screenshot"}
 _REQUIRED = {
     "canvas_set_slider": {"nickname": "string", "value": "number"},
     "canvas_set_panel": {"nickname": "string", "value": "string"},
@@ -40,31 +41,33 @@ _REQUIRED = {
     "canvas_set_preview": {"nickname": "string", "preview": "boolean"},
     "canvas_preflight": {"file": "string"},
     "canvas_import": {"file": "string"},
+    "canvas_import_scripts": {"file": "string"},
     "canvas_export": {"file": "string"},
     "canvas_save": {"file": "string"},
     "viewport_screenshot": {"file": "string"},
     "viewport_set_display_mode": {"mode": "string"},
 }
-_OPTIONAL = {
-    "canvas_import": {
-        "replace_canvas": {"type": "boolean", "description": "Clear a canvas that has objects on it. Set this only after the member agrees."},
-        "add_to_canvas": {"type": "boolean", "description": "Keep the objects on the canvas and add this definition to them."},
-        "allow_scripts": {"type": "boolean", "description": "Import a definition that carries scripts. Set this after telling the member what the scripts do; ask first if the definition came from someone else."},
-    },
+_IMPORT_CHOICES = {
+    "replace_canvas": {"type": "boolean", "description": "Clear a canvas that has objects on it. Set this only after the member agrees."},
+    "add_to_canvas": {"type": "boolean", "description": "Keep the objects on the canvas and add this definition to them."},
 }
+_OPTIONAL = {"canvas_import": _IMPORT_CHOICES, "canvas_import_scripts": _IMPORT_CHOICES}
 _DESCRIPTIONS = {
     "canvas_plugins": "List the third-party Grasshopper plugins installed on the member's machine.",
     "canvas_preflight": "Check which plugins and scripts a local definition has, before canvas_import. Changes nothing.",
-    "canvas_import": ("Import a local definition onto the Rhino canvas. If it carries scripts, this returns "
-                      "definition_has_scripts and changes nothing; repeat with allow_scripts. If the canvas has objects, "
-                      "this returns canvas_not_empty and changes nothing; ask the member, then repeat with replace_canvas "
-                      "or add_to_canvas."),
+    "canvas_import": ("Import a local definition with no scripts onto the Rhino canvas. A definition with scripts "
+                      "returns definition_has_scripts and changes nothing; use canvas_import_scripts. If the canvas has "
+                      "objects, this returns canvas_not_empty and changes nothing; ask the member, then repeat with "
+                      "replace_canvas or add_to_canvas."),
+    "canvas_import_scripts": ("Import a local definition that carries scripts. The scripts run on the member's computer "
+                              "when it solves, outside your sandbox. Tell the member what they do first, and get their "
+                              "approval for a definition that came from someone else. canvas_not_empty applies here too."),
 }
 _NOT_EMPTY = ("The canvas has objects on it, and importing would clear them. Ask the member, then repeat with "
               "replace_canvas true to clear them, or add_to_canvas true to keep them. Nothing has changed.")
 _HAS_SCRIPTS = ("This definition runs code when it solves, and Rhino runs it outside your sandbox. Tell the member "
-                "what the scripts do. If the definition came from someone else, get their approval first. Then repeat "
-                "with allow_scripts true. Nothing has changed.")
+                "what the scripts do. If the definition came from someone else, get their approval first. Then import "
+                "it with canvas_import_scripts. Nothing has changed.")
 _SCRIPT_FIELDS = {"ScriptSource", "ScriptCode", "ScriptUsingCode", "ScriptAdditionalCode", "UsingCode", "AdditionalCode"}
 _NEEDS_UPDATE = "This plugin cannot check definitions yet. Run setup again to update it, or use canvas_import."
 
@@ -153,14 +156,13 @@ class LocalTools:
             return await self.bridge.call("GET", _READ[name])
         if name in _WRITE:
             return await self.bridge.call("POST", _WRITE[name], body=args)
-        if name in {"canvas_import", "canvas_preflight"}:
+        if name in {"canvas_import", "canvas_import_scripts", "canvas_preflight"}:
             definition = self._definition(args.get("file"))
             if name == "canvas_preflight":
                 return await self._preflight(definition)
             scripts = script_report(definition)
-            if ((scripts["script_count"] or scripts["unreadable_cluster_bodies"])
-                    and args.get("allow_scripts") is not True):
-                return {"success": False, "warning": "definition_has_scripts", "message": _HAS_SCRIPTS, **scripts}
+            if name == "canvas_import" and (scripts["script_count"] or scripts["unreadable_cluster_bodies"]):
+                return {"success": False, "error": "definition_has_scripts", "message": _HAS_SCRIPTS, **scripts}
             add = args.get("add_to_canvas") is True
             if not add and args.get("replace_canvas") is not True:
                 status = await self.bridge.call("GET", "/status")

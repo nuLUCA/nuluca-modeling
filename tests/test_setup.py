@@ -88,6 +88,7 @@ def test_default_setup_uses_member_download_and_refuses_a_mismatched_archive(tmp
     archive = release(tmp_path)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     calls = []
+    monkeypatch.setitem(installer.PINNED_ARCHIVES, installer._platform(), digest)
     monkeypatch.setattr(installer, "_member_release", lambda key, **kwargs: ("https://storage.example.test/plugin.zip", digest))
     monkeypatch.setattr(installer, "_read_source", lambda source: calls.append(source) or archive.read_bytes())
 
@@ -108,6 +109,7 @@ def test_download_and_both_clients_use_the_same_selected_service(tmp_path, monke
     if override is not None:
         monkeypatch.setenv("NULUCA_AGENT_CONNECT_URL", override)
     archive = release(tmp_path)
+    monkeypatch.setitem(installer.PINNED_ARCHIVES, installer._platform(), hashlib.sha256(archive.read_bytes()).hexdigest())
     calls = []
 
     def respond(request):
@@ -396,3 +398,96 @@ def test_archive_may_carry_third_party_notices(tmp_path, monkeypatch):
         packed.writestr("SHA256SUMS", "".join(
             f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in plugin.items()))
     assert set(installer._safe_archive(archive.read_bytes(), hashlib.sha256(archive.read_bytes()).hexdigest())) == set(plugin)
+
+
+def download(monkeypatch, archive):
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(installer, "_member_release", lambda key, **kwargs: ("https://storage.example.test/plugin.zip", digest))
+    monkeypatch.setattr(installer, "_read_source", lambda source: archive.read_bytes())
+    return digest
+
+
+def test_a_download_the_wheel_did_not_pin_is_refused_even_with_a_matching_server_checksum(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    download(monkeypatch, release(tmp_path))
+    monkeypatch.setitem(installer.PINNED_ARCHIVES, installer._platform(), "0" * 64)
+    with pytest.raises(installer.SetupError, match="does not match this nuluca-modeling release"):
+        installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("codex",), environment="staging"))
+    assert not (tmp_path / "libraries").exists()
+
+
+def test_production_needs_a_pin_and_staging_says_it_has_none(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    download(monkeypatch, release(tmp_path))
+    monkeypatch.setattr(installer, "PINNED_ARCHIVES", {})
+    with pytest.raises(installer.SetupError, match="no pinned plugin hash"):
+        installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("codex",), environment="production"))
+    result = installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("codex",), environment="staging"))
+    assert any("no pinned plugin hash" in note for note in result["notes"])
+
+
+def test_this_wheel_ships_no_invented_pins():
+    assert installer.PINNED_ARCHIVES == {}
+
+
+def codex_table(tmp_path):
+    import tomllib
+    return tomllib.loads((tmp_path / "home/.codex/config.toml").read_text())["mcp_servers"]["nuluca-modeling"]
+
+
+def test_clients_ask_before_script_imports_by_default(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    result = installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude", "codex")))
+
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+    assert not (tmp_path / "home/.claude/settings.json").exists()
+    assert result["script_tool"]["always_allow"] is False
+    assert "--always-allow-scripts" in result["script_tool"]["next_step"]
+
+
+def test_always_allow_is_the_member_choice_and_lasts_across_setup_runs(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = str(release(tmp_path))
+    settings = tmp_path / "home/.claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"theme": "dark", "permissions": {"allow": ["Bash(ls)"]}}))
+    clients = ("claude", "codex")
+
+    result = installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=True))
+    assert json.loads(settings.read_text())["permissions"]["allow"] == ["Bash(ls)", "mcp__nuluca-modeling__canvas_import_scripts"]
+    assert json.loads(settings.read_text())["theme"] == "dark"
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
+    assert "get their approval" in result["script_tool"]["next_step"]
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients))
+    assert "mcp__nuluca-modeling__canvas_import_scripts" in json.loads(settings.read_text())["permissions"]["allow"]
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=False))
+    assert json.loads(settings.read_text())["permissions"]["allow"] == ["Bash(ls)"]
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+
+
+def test_uninstall_removes_always_allow_and_every_codex_table(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    codex = tmp_path / "home/.codex/config.toml"
+    codex.parent.mkdir(parents=True)
+    codex.write_text('[mcp_servers.other]\ncommand = "x"\n')
+    settings = tmp_path / "home/.claude/settings.json"
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude", "codex"),
+                                           always_allow_scripts=True))
+    installer.uninstall()
+
+    assert json.loads(settings.read_text())["permissions"]["allow"] == []
+    assert "nuluca-modeling" not in codex.read_text()
+    assert "[mcp_servers.other]" in codex.read_text()
+
+
+def test_unreadable_claude_settings_stop_setup_rather_than_being_replaced(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    settings = tmp_path / "home/.claude/settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{not json")
+    with pytest.raises(installer.SetupError, match="could not be read safely"):
+        installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude",),
+                                               always_allow_scripts=True))
+    assert settings.read_text() == "{not json"

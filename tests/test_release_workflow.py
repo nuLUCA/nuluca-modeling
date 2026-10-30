@@ -54,3 +54,8 @@ def test_dist_check_requires_exactly_one_of_each(tmp_path):
     (tmp_path / "b.whl").write_text("w")
     assert any("one wheel" in p for p in problems(tmp_path))
     assert any("one source archive" in p for p in problems(tmp_path))
+
+
+def test_a_wheel_tag_needs_pinned_plugin_hashes():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/publish.yml").read_text()
+    assert "python tests/check_plugin_pins.py" in workflow

@@ -165,8 +165,7 @@ async def test_installed_plugins_are_readable(tmp_path):
 def test_tool_descriptions_tell_the_agent_about_clearing_and_preflight():
     tools = {item["name"]: item for item in local_tools()}
     assert "canvas_not_empty" in tools["canvas_import"]["description"]
-    assert set(tools["canvas_import"]["inputSchema"]["properties"]) == {
-        "file", "replace_canvas", "add_to_canvas", "allow_scripts"}
+    assert set(tools["canvas_import"]["inputSchema"]["properties"]) == {"file", "replace_canvas", "add_to_canvas"}
     assert tools["canvas_preflight"]["inputSchema"]["required"] == ["file"]
 
 
@@ -193,45 +192,53 @@ def test_blank_source_is_not_a_script():
 
 
 @pytest.mark.asyncio
-async def test_import_names_the_scripts_before_anything_runs(tmp_path):
+async def test_plain_import_refuses_scripts_and_names_them(tmp_path):
     local, requests = canvas(tmp_path, status={"component_count": 0})
     (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
 
     result = await local.call("canvas_import", {"file": "scripted.json"})
 
-    assert result["warning"] == "definition_has_scripts"
+    assert result["error"] == "definition_has_scripts"
     assert result["script_count"] == 3
     assert "Pattern" in result["script_components"]
+    assert "canvas_import_scripts" in result["message"]
     assert requests == []
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_cluster_body_also_stops_for_review(tmp_path):
+async def test_an_unreadable_cluster_body_also_goes_to_the_script_tool(tmp_path):
     local, requests = canvas(tmp_path)
     (tmp_path / "work" / "sealed.json").write_text(json.dumps({"Components": [SCRIPTED["Components"][4]]}))
     result = await local.call("canvas_import", {"file": "sealed.json"})
-    assert result["warning"] == "definition_has_scripts"
+    assert result["error"] == "definition_has_scripts"
     assert requests == []
 
 
 @pytest.mark.asyncio
-async def test_allow_scripts_imports_and_the_canvas_check_still_applies(tmp_path):
+async def test_no_argument_lets_plain_import_take_scripts(tmp_path):
+    local, requests = canvas(tmp_path)
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+    result = await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": True, "replace_canvas": True})
+    assert result["error"] == "definition_has_scripts"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_script_tool_imports_and_the_canvas_check_still_applies(tmp_path):
     local, requests = canvas(tmp_path, status={"component_count": 2})
     (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
 
-    blocked = await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": True})
+    blocked = await local.call("canvas_import_scripts", {"file": "scripted.json"})
     assert blocked["warning"] == "canvas_not_empty"
-    await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": True, "replace_canvas": True})
+    await local.call("canvas_import_scripts", {"file": "scripted.json", "replace_canvas": True})
     assert requests[-1].url.path == "/import"
+    assert requests[-1].url.params["clear"] == "true"
 
 
-@pytest.mark.asyncio
-async def test_truthy_strings_do_not_allow_scripts(tmp_path):
-    local, requests = canvas(tmp_path)
-    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
-    result = await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": "yes"})
-    assert result["warning"] == "definition_has_scripts"
-    assert requests == []
+def test_script_import_is_its_own_tool_so_the_client_can_ask():
+    tools = {item["name"]: item for item in local_tools()}
+    assert "outside your sandbox" in tools["canvas_import_scripts"]["description"]
+    assert "allow_scripts" not in tools["canvas_import"]["inputSchema"]["properties"]
 
 
 @pytest.mark.asyncio

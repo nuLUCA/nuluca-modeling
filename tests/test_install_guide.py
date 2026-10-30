@@ -31,7 +31,8 @@ def test_only_the_member_restarts_rhino():
 
 def test_guide_says_definitions_run_code_outside_the_sandbox():
     assert "Definitions can run code, as any Grasshopper file with script components can." in GUIDE
-    assert "outside" in GUIDE and "`allow_scripts`" in GUIDE
+    assert "outside" in GUIDE and "`canvas_import_scripts`" in GUIDE
+    assert "--always-allow-scripts" in GUIDE and "only remaining check" in GUIDE
     assert "allow-agent-code-execution" in GUIDE
     assert "does not expose Python" not in README
 

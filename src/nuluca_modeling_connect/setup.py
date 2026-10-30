@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .plugin_pins import PINNED_ARCHIVES
+
 PLUGIN_NAME = "nuluca-modeling"
 # The current plugin file, then the name earlier releases used. Both share one
 # set of GUIDs, so Grasshopper must never find the two together.
@@ -35,6 +37,13 @@ DEFAULT_URL = SERVICES["production"]
 CONFIGURED_CLIENTS = ("claude", "codex")
 # Any other MCP client: setup changes no client file and returns the stdio entry.
 OTHER_CLIENT = "other"
+SCRIPT_TOOL = "canvas_import_scripts"
+CLAUDE_SCRIPT_RULE = f"mcp__{PLUGIN_NAME}__{SCRIPT_TOOL}"
+SCRIPT_CHOICE = ("The client asks before each script import. Ask the member whether they want that, or always allow, "
+                 "which lasts across sessions. To always allow, run setup again with --always-allow-scripts.")
+SCRIPT_ALWAYS_ON = ("The client will not ask before script imports, so show the member the scripts in any definition "
+                    "from someone else and get their approval yourself.")
+_CODEX_TABLES = r"(?ms)^\[mcp_servers\.nuluca-modeling(?:\.[^\]\n]+)?\]\n.*?(?=^\[|\Z)"
 RESTART_STEP = ("Ask the member to save their work and restart Rhino themselves. Never quit, kill or "
                 "relaunch their Rhino. After they restart it, call nuluca_status.")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -53,6 +62,7 @@ class SetupOptions:
     dry_run: bool = False
     environment: str | None = None
     package_spec: str | None = None
+    always_allow_scripts: bool | None = None
 
 
 def _home() -> Path:
@@ -90,6 +100,10 @@ def _stale_libraries_dirs() -> tuple[Path, ...]:
 
 def _claude_config() -> Path:
     return _home() / ".claude.json"
+
+
+def _claude_settings() -> Path:
+    return _home() / ".claude" / "settings.json"
 
 
 def _codex_config() -> Path:
@@ -351,6 +365,40 @@ def _manual_entry(command: str, args: list[str], *, base_url: str) -> dict:
     }}
 
 
+def _check_pinned_archive(payload: bytes, *, base_url: str) -> list[str]:
+    pinned = PINNED_ARCHIVES.get(_platform())
+    if pinned is None:
+        if base_url == SERVICES["production"]:
+            raise SetupError("This nuluca-modeling release has no pinned plugin hash, so it cannot install "
+                             "the production plugin. Update nuluca-modeling and run setup again.")
+        return ["This nuluca-modeling build has no pinned plugin hash; only the download checksum was checked."]
+    if hashlib.sha256(payload).hexdigest() != pinned:
+        raise SetupError("The plugin download does not match this nuluca-modeling release. "
+                         "Update nuluca-modeling and run setup again.")
+    return []
+
+
+def _set_claude_script_rule(allowed: bool, *, dry_run: bool) -> None:
+    """Add or remove the one permission rule, leaving the member's other settings as they are."""
+    path = _claude_settings()
+    try:
+        document = json.loads(path.read_text()) if path.exists() else {}
+        permissions = document.setdefault("permissions", {})
+        rules = permissions.setdefault("allow", [])
+        if not isinstance(rules, list):
+            raise ValueError
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        raise SetupError("Claude Code settings could not be read safely.") from exc
+    if (CLAUDE_SCRIPT_RULE in rules) == allowed:
+        return
+    if allowed:
+        rules.append(CLAUDE_SCRIPT_RULE)
+    else:
+        rules.remove(CLAUDE_SCRIPT_RULE)
+    if not dry_run:
+        _atomic_write(path, json.dumps(document, indent=2) + "\n")
+
+
 def _claude_entry(key: str, command: str, args: list[str], *, base_url: str) -> dict:
     return {"command": command, "args": args, "env": {
         "NULUCA_AGENT_CONNECT_URL": base_url, "NULUCA_AGENT_CONNECT_KEY": key,
@@ -378,13 +426,13 @@ def _toml(value: str) -> str:
     return json.dumps(value)
 
 
-def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, dry_run: bool) -> Path:
+def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, always_allow_scripts: bool,
+                     dry_run: bool) -> Path:
     path = _codex_config()
     existing = path.read_text() if path.exists() else ""
     # A server table continues until the next table. Remove this exact server and
     # its nested env table so a rerun is an upgrade, never a second registration.
-    pattern = r"(?ms)^\[mcp_servers\.nuluca-modeling(?:\.env)?\]\n.*?(?=^\[|\Z)"
-    existing = re.sub(pattern, "", existing).rstrip()
+    existing = re.sub(_CODEX_TABLES, "", existing).rstrip()
     block = "\n".join((
         "[mcp_servers.nuluca-modeling]",
         f"command = {_toml(command)}",
@@ -393,6 +441,9 @@ def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, 
         "[mcp_servers.nuluca-modeling.env]",
         f"NULUCA_AGENT_CONNECT_URL = {_toml(base_url)}",
         f"NULUCA_AGENT_CONNECT_KEY = {_toml(key)}",
+        "",
+        f"[mcp_servers.nuluca-modeling.tools.{SCRIPT_TOOL}]",
+        f'approval_mode = "{"approve" if always_allow_scripts else "prompt"}"',
         "",
     ))
     if not dry_run:
@@ -417,6 +468,7 @@ def setup(options: SetupOptions) -> dict:
     base_url = _service_url(options.environment)
     command, args = _server_entry(options.package_spec)
     state = _load_state()
+    pin_notes: list[str] = []
     if options.source:
         expected = _published_digest(options.source, options.checksums)
         payload = _read_source(options.source)
@@ -425,20 +477,29 @@ def setup(options: SetupOptions) -> dict:
             raise SetupError("--checksums-source requires --plugin-source.")
         source, expected = _member_release(options.key, base_url=base_url)
         payload = _read_source(source)
+        pin_notes = _check_pinned_archive(payload, base_url=base_url)
     plugin_files = _safe_archive(payload, expected)
     plugin_paths, restore, notes = _copy_plugin(plugin_files, dry_run=options.dry_run, state=state)
+    notes = [*pin_notes, *notes]
+    always_allow = (state.get("always_allow_scripts") is True if options.always_allow_scripts is None
+                    else options.always_allow_scripts)
     configs: dict[str, str] = {}
     for client in options.clients:
         if client == "claude":
             path = _configure_claude(options.key, command, args, base_url=base_url, dry_run=options.dry_run)
+            _set_claude_script_rule(always_allow, dry_run=options.dry_run)
             configs[client] = str(path)
         elif client == "codex":
-            path = _configure_codex(options.key, command, args, base_url=base_url, dry_run=options.dry_run)
+            path = _configure_codex(options.key, command, args, base_url=base_url,
+                                    always_allow_scripts=always_allow, dry_run=options.dry_run)
             configs[client] = str(path)
     if not options.dry_run:
         _atomic_write(_state_file(), json.dumps({"plugin_paths": plugin_paths, "plugin_restore": restore,
-                                                  "clients": list(options.clients)}, indent=2) + "\n")
-    result = {"service": base_url, "plugin": plugin_paths, "clients": configs, "restart": RESTART_STEP}
+                                                  "clients": list(options.clients),
+                                                  "always_allow_scripts": always_allow}, indent=2) + "\n")
+    result = {"service": base_url, "plugin": plugin_paths, "clients": configs, "restart": RESTART_STEP,
+              "script_tool": {"tool": SCRIPT_TOOL, "always_allow": always_allow,
+                              "next_step": SCRIPT_ALWAYS_ON if always_allow else SCRIPT_CHOICE}}
     if notes:
         result["notes"] = notes
     if OTHER_CLIENT in options.clients:
@@ -479,8 +540,9 @@ def uninstall(*, dry_run: bool = False) -> dict:
                     content = json.dumps(document, indent=2, sort_keys=True) + "\n"
             except ValueError:
                 raise SetupError("Claude Code configuration could not be read safely.")
+            _set_claude_script_rule(False, dry_run=dry_run)
         else:
-            content = re.sub(r"(?ms)^\[mcp_servers\.nuluca-modeling(?:\.env)?\]\n.*?(?=^\[|\Z)", "", content).strip() + "\n"
+            content = re.sub(_CODEX_TABLES, "", content).strip() + "\n"
         if not dry_run:
             _atomic_write(path, content)
         removed.append(str(path))

@@ -38,6 +38,9 @@ jobs:
             echo "Tagged commit ${GITHUB_SHA} is not on main." >&2
             exit 1
           fi
+      - name: Release tags must carry the plugin hashes
+        if: github.ref_type == 'tag'
+        run: python tests/check_plugin_pins.py
       - name: Build the wheel and source distribution
         run: python -m build
       - name: Verify import boundary and inspected archive membership
