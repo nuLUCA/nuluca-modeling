@@ -38,12 +38,12 @@ CONFIGURED_CLIENTS = ("claude", "codex")
 # Any other MCP client: setup changes no client file and returns the stdio entry.
 OTHER_CLIENT = "other"
 # Tools that execute supplied code. Each keeps its own prompt under --always-allow-tools.
-SCRIPT_TOOLS = ("canvas_import_scripts",)
+SCRIPT_TOOLS = ("canvas_import_scripts", "blender_run")
 CLAUDE_SERVER_RULE = f"mcp__{PLUGIN_NAME}"
 CLAUDE_SCRIPT_RULES = tuple(f"{CLAUDE_SERVER_RULE}__{tool}" for tool in SCRIPT_TOOLS)
 APPROVAL_CHOICE = ("Ask the member once whether to work with no client prompts while they are away. "
-                   "--always-allow-tools covers every nuLUCA tool except script imports, and --always-allow-scripts "
-                   "covers script imports. Both last across sessions, and the --no- forms remove them.")
+                   "--always-allow-tools covers every nuLUCA tool except script imports and blender_run, and "
+                   "--always-allow-scripts covers those two. Both last across sessions, and the --no- forms remove them.")
 SCRIPT_ALWAYS_ON = ("The client will not ask before script imports, so show the member the scripts in any definition "
                     "from someone else and get their approval yourself. Script imports are recorded in "
                     "~/.nuluca-modeling-connect/script-imports.jsonl.")

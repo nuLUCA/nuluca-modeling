@@ -1,7 +1,7 @@
 # Local Blender run, October 30, 2026
 
 Blender 5.2.2 LTS, build `d13f752e3b9c`, on an Apple Silicon Mac with 24 GB of memory
-and 40% free at the start. The tools were called in process through `BlenderTools`.
+and 49% free at the start. The tools were called in process through `BlenderTools`.
 No MCP client was involved, so a member's agent has not driven this yet.
 
 The model is a small Geometry Nodes field: cubes instanced on a grid with `Count` and
@@ -9,16 +9,17 @@ The model is a small Geometry Nodes field: cubes instanced on a grid with `Count
 
 | Call | Seconds | Peak memory (MB) | Result |
 |---|---|---|---|
-| `blender_run` (build) | 1.04 | 265 | `.blend` saved |
-| `blender_inspect` | 0.78 | 259 | 64 instances, both controls listed |
-| `blender_preview` | 1.02 | 382 | One 800 × 600 view, checked by eye |
-| `blender_vary` (2 and 64) | 1.03 | 268 | 4 and 4,096 instances, unchanged on reopen |
-| `blender_export` glb | 0.78 | 264 | 768 of 768 triangles read back, bounds delta 0 |
-| `blender_export` usd | 0.78 | 266 | Completed |
-| `blender_export` stl | 0.78 | 257 | Completed |
-| `blender_export` obj | 0.77 | 257 | Completed |
+| `blender_run` (build) | 0.78 | 269 | `.blend` saved |
+| `blender_inspect` | 0.79 | 260 | 64 instances, both controls listed |
+| `blender_preview` | 1.04 | 381 | One 800 × 600 view |
+| `blender_vary` (2 and 64) | 0.79 | 271 | 4 and 4,096 instances, unchanged on reopen |
+| `blender_export` glb | 0.79 | 261 | 768 of 768 triangles read back, bounds delta 0 |
+| `blender_export` usd | 0.79 | 265 | Completed |
+| `blender_export` stl | 0.78 | 260 | Completed |
+| `blender_export` obj | 0.79 | 259 | Completed |
 
-Time to the first preview, from an empty work folder: 3.41 s.
+Time to the first preview, from an empty work folder: 2.81 s. These numbers are from
+the final code. An earlier preview from the same model was checked by eye.
 
 ## Guard
 

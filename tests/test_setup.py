@@ -455,7 +455,8 @@ def test_always_allow_is_the_member_choice_and_lasts_across_setup_runs(tmp_path,
     clients = ("claude", "codex")
 
     result = installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=True))
-    assert json.loads(settings.read_text())["permissions"]["allow"] == ["Bash(ls)", "mcp__nuluca-modeling__canvas_import_scripts"]
+    assert json.loads(settings.read_text())["permissions"]["allow"] == [
+        "Bash(ls)", "mcp__nuluca-modeling__canvas_import_scripts", "mcp__nuluca-modeling__blender_run"]
     assert json.loads(settings.read_text())["theme"] == "dark"
     assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
     assert "get their approval" in result["approvals"]["next_step"]
@@ -504,7 +505,7 @@ def test_unattended_tools_keep_the_script_prompt_until_it_is_chosen_too(tmp_path
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_tools=True))
     rules = json.loads(settings.read_text())["permissions"]
     assert rules["allow"] == ["mcp__nuluca-modeling"]
-    assert rules["ask"] == ["mcp__nuluca-modeling__canvas_import_scripts"]
+    assert rules["ask"] == ["mcp__nuluca-modeling__canvas_import_scripts", "mcp__nuluca-modeling__blender_run"]
     table = codex_table(tmp_path)
     assert table["default_tools_approval_mode"] == "approve"
     assert table["tools"]["canvas_import_scripts"]["approval_mode"] == "auto"
@@ -512,7 +513,8 @@ def test_unattended_tools_keep_the_script_prompt_until_it_is_chosen_too(tmp_path
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=True))
     rules = json.loads(settings.read_text())["permissions"]
     assert "ask" not in rules
-    assert set(rules["allow"]) == {"mcp__nuluca-modeling", "mcp__nuluca-modeling__canvas_import_scripts"}
+    assert set(rules["allow"]) == {"mcp__nuluca-modeling", "mcp__nuluca-modeling__canvas_import_scripts",
+                                   "mcp__nuluca-modeling__blender_run"}
     assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
 
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_tools=False,

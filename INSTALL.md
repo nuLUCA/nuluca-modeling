@@ -109,8 +109,8 @@ sessions, and the `--no-` form or `--uninstall` removes it.
 
 | Option | Effect |
 |---|---|
-| `--always-allow-tools` | Every nuLUCA tool runs with no client prompt, except script imports |
-| `--always-allow-scripts` | `canvas_import_scripts` runs with no client prompt |
+| `--always-allow-tools` | Every nuLUCA tool runs with no client prompt, except `canvas_import_scripts` and `blender_run` |
+| `--always-allow-scripts` | `canvas_import_scripts` and `blender_run` run with no client prompt |
 
 | Client | Permanent setting |
 |---|---|
@@ -118,7 +118,8 @@ sessions, and the `--no-` form or `--uninstall` removes it.
 | Codex | `approval_mode = "approve"` under `[mcp_servers.nuluca-modeling.tools.canvas_import_scripts]` in `config.toml`. Answering "Allow and don't ask me again" at the prompt writes the same line, and setup keeps it. With `--always-allow-tools`, setup also sets `default_tools_approval_mode = "approve"`. |
 | Other clients | Use that client's own approval setting. Setup writes nothing for them. |
 
-Setup writes a permission only when the member chooses it.
+`blender_run` gets the same settings as `canvas_import_scripts`. Setup writes a
+permission only when the member chooses it.
 
 With no standing permission, a run that nobody is watching gets a refusal, and the
 call does not happen. `claude -p` and Codex with `approval_policy = "never"` both
@@ -129,6 +130,13 @@ With `--always-allow-scripts` on, the client stops asking, so your duty to show 
 member the scripts in someone else's definition is the only remaining check. Each
 script import is recorded in `~/.nuluca-modeling-connect/script-imports.jsonl` with
 the time, file, hash and component names. The record holds no source.
+
+## Blender
+
+A member with no Rhino can model in Blender 4.2 or newer. Setup installs nothing for
+it. Call `blender_status`, then `blender_guide`. If Blender is missing, ask the member
+before installing it from blender.org. `NULUCA_MODELING_BLENDER=fixed` removes
+`blender_run` and `blender_write`, and `off` removes every Blender tool.
 
 ## Off switch
 

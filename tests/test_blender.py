@@ -21,6 +21,7 @@ from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 import nuluca_modeling_connect
 from nuluca_modeling_connect import blender_discovery as discovery
 from nuluca_modeling_connect import blender_memory as memory
+from nuluca_modeling_connect import setup as member_setup
 from nuluca_modeling_connect.blender import BlenderError, BlenderTools, blender_tools
 from nuluca_modeling_connect.server import make_server
 
@@ -370,6 +371,23 @@ async def test_case_names_become_safe_distinct_files(tmp_path, cases):
     (work.root / "a.blend").write_text("x")
     with pytest.raises(BlenderError, match="distinct simple names"):
         await work.call("blender_vary", {"file": "a.blend", "object": "M", "cases": cases})
+
+
+def test_standing_tool_permission_still_prompts_for_blender_run(tmp_path, monkeypatch):
+    settings, config = tmp_path / "settings.json", tmp_path / "config.toml"
+    monkeypatch.setattr(member_setup, "_claude_settings", lambda: settings)
+    monkeypatch.setattr(member_setup, "_codex_config", lambda: config)
+    rule = "mcp__nuluca-modeling__blender_run"
+    member_setup._set_claude_rules(allow_tools=True, allow_scripts=False, dry_run=False)
+    permissions = json.loads(settings.read_text())["permissions"]
+    assert rule in permissions["ask"] and rule not in permissions["allow"]
+    member_setup._set_claude_rules(allow_tools=True, allow_scripts=True, dry_run=False)
+    permissions = json.loads(settings.read_text())["permissions"]
+    assert rule in permissions["allow"] and "ask" not in permissions
+    member_setup._configure_codex("ae_test", "uvx", [], base_url="https://example.test", always_allow_tools=True,
+                                  always_allow_scripts=False, dry_run=False)
+    text = config.read_text()
+    assert '[mcp_servers.nuluca-modeling.tools.blender_run]\napproval_mode = "prompt"' in text
 
 
 # Stopping -----------------------------------------------------------------
