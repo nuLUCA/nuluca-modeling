@@ -2,7 +2,8 @@
 
 Blender 5.2.2 LTS, build `d13f752e3b9c`, on an Apple Silicon Mac with 24 GB of memory
 and 49% free at the start. The tools were called in process through `BlenderTools`.
-No MCP client was involved, so a member's agent has not driven this yet.
+A separate test drives the same tools over a real MCP stdio connection. No model
+client has done so yet, so a zero-click member journey is not proved.
 
 The model is a small Geometry Nodes field: cubes instanced on a grid with `Count` and
 `Realize for export` controls. It tests the tools. It is not a design.

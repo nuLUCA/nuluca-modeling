@@ -267,9 +267,12 @@ async def test_fixed_mode_refuses_python(tmp_path):
         await work.call("blender_run", {"script": "x.py"})
 
 
-def test_only_the_run_tool_is_marked_as_code_execution():
-    marked = [item["name"] for item in blender_tools({}) if item.get("annotations", {}).get("destructiveHint")]
-    assert marked == ["blender_run"]
+def test_annotations_are_accurate_on_every_tool():
+    listed = {item["name"]: item["annotations"] for item in blender_tools({})}
+    assert [name for name, hints in listed.items() if hints["openWorldHint"]] == ["blender_run"]
+    assert {name for name, hints in listed.items() if hints["readOnlyHint"]} == {
+        "blender_status", "blender_guide", "blender_capabilities", "blender_inspect"}
+    assert listed["blender_run"]["destructiveHint"] and not listed["blender_preview"]["destructiveHint"]
 
 
 # Files a script can tamper with --------------------------------------------
@@ -422,9 +425,11 @@ def test_standing_tool_permission_still_prompts_for_blender_run(tmp_path, monkey
     permissions = json.loads(settings.read_text())["permissions"]
     assert rule in permissions["allow"] and "ask" not in permissions
     member_setup._configure_codex("ae_test", "uvx", [], base_url="https://example.test", always_allow_tools=True,
-                                  always_allow_scripts=False, dry_run=False)
-    text = config.read_text()
-    assert '[mcp_servers.nuluca-modeling.tools.blender_run]\napproval_mode = "prompt"' in text
+                                  always_allow_scripts=False, keep_member_choice=False, dry_run=False)
+    assert '[mcp_servers.nuluca-modeling.tools.blender_run]\napproval_mode = "auto"' in config.read_text()
+    member_setup._configure_codex("ae_test", "uvx", [], base_url="https://example.test", always_allow_tools=True,
+                                  always_allow_scripts=True, keep_member_choice=False, dry_run=False)
+    assert '[mcp_servers.nuluca-modeling.tools.blender_run]\napproval_mode = "approve"' in config.read_text()
 
 
 # Stopping -----------------------------------------------------------------

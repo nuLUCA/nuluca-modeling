@@ -115,8 +115,6 @@ _AUTHOR_TOOLS = [
      "description": "Run a Python script from the modeling work folder in a new background Blender. This executes "
                     "code on the member's machine. The script's first argument is its artifacts folder, followed "
                     "by inputs and args. Never run a script from someone else unless the member has seen it.",
-     "annotations": {"title": "Run Python in Blender", "readOnlyHint": False, "destructiveHint": True,
-                     "openWorldHint": False},
      "inputSchema": _schema({"script": _FILE,
                              "inputs": {"type": "array", "items": {"type": "string"},
                                         "description": "Files in the work folder, hashed into the receipt."},
@@ -124,6 +122,20 @@ _AUTHOR_TOOLS = [
                              "timeout_seconds": {"type": "number"}, "memory_limit_gb": {"type": "number"},
                              "wait_seconds": _WAIT}, ("script",))},
 ]
+
+
+_READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
+_ADDS_FILES = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+_ANNOTATIONS = {
+    "blender_status": _READ_ONLY, "blender_guide": _READ_ONLY, "blender_capabilities": _READ_ONLY,
+    "blender_inspect": _READ_ONLY, "blender_vary": _ADDS_FILES, "blender_export": _ADDS_FILES,
+    "blender_preview": _ADDS_FILES,
+    "blender_cancel": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    "blender_write": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    # A script reaches whatever the member's own account can, so this is the open-world tool.
+    "blender_run": {"title": "Run Python in Blender", "readOnlyHint": False, "destructiveHint": True,
+                    "idempotentHint": False, "openWorldHint": True},
+}
 
 
 def _mode(env) -> str:
@@ -136,7 +148,8 @@ def blender_tools(env=None) -> list[dict]:
     mode = _mode(os.environ if env is None else env)
     if mode == "off":
         return []
-    return [*_FIXED_TOOLS, *(_AUTHOR_TOOLS if mode == "on" else [])]
+    return [{**item, "annotations": _ANNOTATIONS[item["name"]]}
+            for item in (*_FIXED_TOOLS, *(_AUTHOR_TOOLS if mode == "on" else []))]
 
 
 def _sha(path: Path) -> str:
