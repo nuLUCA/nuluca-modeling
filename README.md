@@ -1,7 +1,7 @@
 # nuLUCA Modeling
 
-`nuluca-modeling` connects Claude Code or Codex to nuLUCA Modeling and the
-local JsonToGH Grasshopper bridge.
+`nuluca-modeling` connects Claude Code, Codex or another MCP client to nuLUCA
+Modeling and the local nuLUCA for Grasshopper plugin.
 
 Ask your Claude Code or Codex agent:
 
@@ -31,5 +31,8 @@ to production, which reports that the download is unavailable until it is
 deployed there. `NULUCA_AGENT_CONNECT_URL` selects another HTTPS service origin
 when `--environment` is not given. Use a key for the chosen environment.
 
-The shell exposes granted cloud operations and local modeling tools. It does
-not expose Python or command execution.
+The shell exposes granted cloud operations and local modeling tools. It has no
+Python or command tool of its own. Definitions can still run code, as any
+Grasshopper file with script components can, and agent code execution is on in the
+plugin by default. Rhino runs with the member's full rights, outside the agent's
+sandbox. `INSTALL.md` covers what this means and the off switch.

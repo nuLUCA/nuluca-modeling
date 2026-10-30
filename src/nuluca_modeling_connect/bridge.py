@@ -48,7 +48,7 @@ class BridgeClient:
 
     def _discovery(self) -> dict:
         if not self.root.is_dir():
-            raise BridgeError("Start Rhino and the JsonToGH plugin first.")
+            raise BridgeError("Start Rhino and open Grasshopper first.")
         if os.name != "nt" and self.root.stat().st_mode & 0o077:
             raise BridgeError("The bridge discovery directory must be private.")
         pinned = os.environ.get("NULUCA_GH_BRIDGE_PORT")

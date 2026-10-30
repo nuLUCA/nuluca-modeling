@@ -29,6 +29,18 @@ def test_only_the_member_restarts_rhino():
         assert phrase not in GUIDE and phrase not in README
 
 
+def test_guide_says_definitions_run_code_outside_the_sandbox():
+    assert "Definitions can run code, as any Grasshopper file with script components can." in GUIDE
+    assert "outside" in GUIDE and "`allow_scripts`" in GUIDE
+    assert "allow-agent-code-execution" in GUIDE
+    assert "does not expose Python" not in README
+
+
+def test_guide_uses_the_current_plugin_file_and_retires_the_old_one():
+    assert installer.PLUGIN_BINARIES[0] in GUIDE
+    assert f"Delete `{installer.PLUGIN_BINARIES[1]}`" in GUIDE
+
+
 def test_guide_confirms_with_nuluca_status_and_serves_any_client():
     assert "`nuluca_status`" in GUIDE
     assert "--client other" in GUIDE
@@ -36,6 +48,6 @@ def test_guide_confirms_with_nuluca_status_and_serves_any_client():
 
 def test_every_documented_bridge_message_exists_in_the_code():
     bridge = (ROOT / "src/nuluca_modeling_connect/bridge.py").read_text()
-    for message in ("Start Rhino and the JsonToGH plugin first.", "No running Rhino bridge is available.",
+    for message in ("Start Rhino and open Grasshopper first.", "No running Rhino bridge is available.",
                     "Select one running Rhino bridge"):
         assert message in bridge and message in GUIDE

@@ -49,16 +49,23 @@ _OPTIONAL = {
     "canvas_import": {
         "replace_canvas": {"type": "boolean", "description": "Clear a canvas that has objects on it. Set this only after the member agrees."},
         "add_to_canvas": {"type": "boolean", "description": "Keep the objects on the canvas and add this definition to them."},
+        "allow_scripts": {"type": "boolean", "description": "Import a definition that carries scripts. Set this after telling the member what the scripts do; ask first if the definition came from someone else."},
     },
 }
 _DESCRIPTIONS = {
     "canvas_plugins": "List the third-party Grasshopper plugins installed on the member's machine.",
-    "canvas_preflight": "Check which plugins a local definition needs and which are missing, before canvas_import. Changes nothing.",
-    "canvas_import": ("Import a local definition onto the Rhino canvas. If the canvas has objects, this returns "
-                      "canvas_not_empty and changes nothing; ask the member, then repeat with replace_canvas or add_to_canvas."),
+    "canvas_preflight": "Check which plugins and scripts a local definition has, before canvas_import. Changes nothing.",
+    "canvas_import": ("Import a local definition onto the Rhino canvas. If it carries scripts, this returns "
+                      "definition_has_scripts and changes nothing; repeat with allow_scripts. If the canvas has objects, "
+                      "this returns canvas_not_empty and changes nothing; ask the member, then repeat with replace_canvas "
+                      "or add_to_canvas."),
 }
 _NOT_EMPTY = ("The canvas has objects on it, and importing would clear them. Ask the member, then repeat with "
               "replace_canvas true to clear them, or add_to_canvas true to keep them. Nothing has changed.")
+_HAS_SCRIPTS = ("This definition runs code when it solves, and Rhino runs it outside your sandbox. Tell the member "
+                "what the scripts do. If the definition came from someone else, get their approval first. Then repeat "
+                "with allow_scripts true. Nothing has changed.")
+_SCRIPT_FIELDS = {"ScriptSource", "ScriptCode", "ScriptUsingCode", "ScriptAdditionalCode", "UsingCode", "AdditionalCode"}
 _NEEDS_UPDATE = "This plugin cannot check definitions yet. Run setup again to update it, or use canvas_import."
 
 
@@ -74,6 +81,35 @@ def local_tools() -> list[dict]:
             }, "required": list(fields), "additionalProperties": True},
         })
     return tools
+
+
+def _label(node: dict) -> str:
+    return str(node.get("NickName") or node.get("Name") or node.get("Type") or "unnamed component")
+
+
+def script_report(definition: dict) -> dict:
+    """Name the components that carry source, and the cluster bodies that cannot be read here."""
+    scripts: dict[int, str] = {}
+    opaque: dict[int, str] = {}
+
+    def visit(node: object, owner: dict | None) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item, owner)
+        elif isinstance(node, dict):
+            owner = node if "Type" in node else owner
+            for key, value in node.items():
+                filled = isinstance(value, str) and bool(value.strip())
+                if key in _SCRIPT_FIELDS and filled:
+                    scripts[id(owner or node)] = _label(owner or node)
+                elif key == "NativeDocument" and filled:
+                    opaque[id(owner or node)] = _label(owner or node)
+                else:
+                    visit(value, owner)
+
+    visit(definition, None)
+    return {"script_count": len(scripts), "script_components": sorted(scripts.values()),
+            "unreadable_cluster_bodies": sorted(opaque.values())}
 
 
 class LocalTools:
@@ -102,11 +138,12 @@ class LocalTools:
         return definition
 
     async def _preflight(self, definition: dict) -> dict:
+        scripts = script_report(definition)
         try:
-            return await self.bridge.call("POST", "/preflight", body=definition)
+            return {**await self.bridge.call("POST", "/preflight", body=definition), **scripts}
         except BridgeError as exc:
             if "(404)" in str(exc):
-                return {"success": False, "error": "preflight_unavailable", "message": _NEEDS_UPDATE}
+                return {"success": False, "error": "preflight_unavailable", "message": _NEEDS_UPDATE, **scripts}
             raise
 
     async def call(self, name: str, args: dict) -> dict:
@@ -120,6 +157,10 @@ class LocalTools:
             definition = self._definition(args.get("file"))
             if name == "canvas_preflight":
                 return await self._preflight(definition)
+            scripts = script_report(definition)
+            if ((scripts["script_count"] or scripts["unreadable_cluster_bodies"])
+                    and args.get("allow_scripts") is not True):
+                return {"success": False, "warning": "definition_has_scripts", "message": _HAS_SCRIPTS, **scripts}
             add = args.get("add_to_canvas") is True
             if not add and args.get("replace_canvas") is not True:
                 status = await self.bridge.call("GET", "/status")

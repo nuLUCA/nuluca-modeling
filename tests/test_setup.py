@@ -11,7 +11,7 @@ from nuluca_modeling_connect import setup as installer
 
 def release(tmp_path):
     archive = tmp_path / "JsonToGH-0.1.0-mac.zip"
-    plugin = {"JsonToGH_Fresh.gha": b"plugin", "Newtonsoft.Json.dll": b"dependency"}
+    plugin = {"nuLUCA-for-Grasshopper.gha": b"plugin", "Newtonsoft.Json.dll": b"dependency"}
     with zipfile.ZipFile(archive, "w") as packed:
         for name, content in plugin.items():
             packed.writestr(name, content)
@@ -41,7 +41,7 @@ def test_setup_upgrades_clients_without_printing_key_and_uninstall_removes_owned
     assert "restart Rhino themselves" in result["restart"]
     assert "Never quit, kill or relaunch" in result["restart"]
     assert "nuluca_status" in result["restart"]
-    assert (tmp_path / "libraries" / "JsonToGH_Fresh.gha").read_bytes() == b"plugin"
+    assert (tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha").read_bytes() == b"plugin"
     claude = json.loads((tmp_path / "home" / ".claude.json").read_text())
     assert claude["mcpServers"]["nuluca-modeling"]["env"]["NULUCA_AGENT_CONNECT_KEY"] == "ae_test_secret"
     codex = (tmp_path / "home" / ".codex" / "config.toml").read_text()
@@ -50,8 +50,8 @@ def test_setup_upgrades_clients_without_printing_key_and_uninstall_removes_owned
     installer.setup(options)
     assert (tmp_path / "home" / ".codex" / "config.toml").read_text().count("[mcp_servers.nuluca-modeling]") == 1
     removed = installer.uninstall()["removed"]
-    assert str(tmp_path / "libraries" / "JsonToGH_Fresh.gha") in removed
-    assert not (tmp_path / "libraries" / "JsonToGH_Fresh.gha").exists()
+    assert str(tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha") in removed
+    assert not (tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha").exists()
     assert "nuluca-modeling" not in json.loads((tmp_path / "home" / ".claude.json").read_text())["mcpServers"]
 
 
@@ -66,7 +66,7 @@ def test_setup_refuses_a_zip_that_does_not_match_published_sums(tmp_path, monkey
 def test_uninstall_restores_a_plugin_that_setup_upgraded(tmp_path, monkeypatch):
     home(monkeypatch, tmp_path)
     archive = release(tmp_path)
-    original = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    original = tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha"
     original.parent.mkdir()
     original.write_bytes(b"previous-plugin")
 
@@ -154,6 +154,85 @@ def test_mac_install_goes_to_the_folder_grasshopper_loads(monkeypatch, tmp_path)
         / "Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries")
 
 
+def old_layout(tmp_path):
+    archive = tmp_path / "JsonToGH-0.1.4-mac.zip"
+    plugin = {"JsonToGH_Fresh.gha": b"old-plugin", "Newtonsoft.Json.dll": b"dependency"}
+    with zipfile.ZipFile(archive, "w") as packed:
+        for name, content in plugin.items():
+            packed.writestr(name, content)
+        packed.writestr("SHA256SUMS", "".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in plugin.items()))
+    (tmp_path / "SHA256SUMS").write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+    return archive
+
+
+def test_upgrade_removes_the_old_plugin_name_so_two_copies_never_load(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    installer.setup(installer.SetupOptions(str(old_layout(tmp_path)), None, "ae_test_secret", ("codex",)))
+    assert (tmp_path / "libraries" / "JsonToGH_Fresh.gha").read_bytes() == b"old-plugin"
+
+    result = installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+
+    assert {path.name for path in (tmp_path / "libraries").iterdir()} == {
+        "Newtonsoft.Json.dll", "nuLUCA-for-Grasshopper.gha"}
+    assert any("JsonToGH_Fresh.gha" in note for note in result["notes"])
+    assert not (tmp_path / "home/.nuluca-modeling-connect/plugin-backups/JsonToGH_Fresh.gha").exists()
+
+
+def test_a_manually_installed_old_plugin_is_retired_and_restored_on_uninstall(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    old = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    old.parent.mkdir()
+    old.write_bytes(b"manual-copy")
+
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+    assert not old.exists()
+    installer.uninstall()
+    assert old.read_bytes() == b"manual-copy"
+    assert not (tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha").exists()
+
+
+def test_dry_run_reports_the_old_plugin_and_leaves_it(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    old = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    old.parent.mkdir()
+    old.write_bytes(b"manual-copy")
+    result = installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",),
+                                                    dry_run=True))
+    assert old.read_bytes() == b"manual-copy"
+    assert any("JsonToGH_Fresh.gha" in note for note in result["notes"])
+
+
+def test_a_locked_old_plugin_stops_setup_before_a_second_copy_lands(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    old = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    old.parent.mkdir()
+    old.write_bytes(b"loaded")
+    path_type = type(old)
+    real_unlink = path_type.unlink
+
+    def locked(self, *args, **kwargs):
+        if self.name == "JsonToGH_Fresh.gha":
+            raise PermissionError(13, "in use")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "unlink", locked)
+    with pytest.raises(installer.SetupError, match="close Rhino"):
+        installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+    assert not (tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha").exists()
+
+
+def test_archive_with_both_plugin_names_is_refused(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = tmp_path / "both.zip"
+    with zipfile.ZipFile(archive, "w") as packed:
+        for name in ("nuLUCA-for-Grasshopper.gha", "JsonToGH_Fresh.gha", "Newtonsoft.Json.dll"):
+            packed.writestr(name, b"x")
+        packed.writestr("SHA256SUMS", "")
+    with pytest.raises(installer.SetupError, match="layout"):
+        installer._safe_archive(archive.read_bytes(), hashlib.sha256(archive.read_bytes()).hexdigest())
+
+
 def test_setup_moves_a_plugin_left_in_the_old_mac_folder(tmp_path, monkeypatch):
     home(monkeypatch, tmp_path)
     stale = tmp_path / "home/Library/Application Support/Grasshopper/Libraries/JsonToGH_Fresh.gha"
@@ -161,13 +240,13 @@ def test_setup_moves_a_plugin_left_in_the_old_mac_folder(tmp_path, monkeypatch):
     stale.write_bytes(b"old")
     state = tmp_path / "home/.nuluca-modeling-connect/setup-state.json"
     state.parent.mkdir(parents=True)
-    state.write_text(json.dumps({"plugin_paths": {"JsonToGH_Fresh.gha": str(stale)}, "plugin_restore": {}, "clients": []}))
+    state.write_text(json.dumps({"plugin_paths": {"nuLUCA-for-Grasshopper.gha": str(stale)}, "plugin_restore": {}, "clients": []}))
     monkeypatch.setattr(installer.os, "name", "posix")
 
     installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
 
     assert not stale.exists()
-    assert (tmp_path / "libraries" / "JsonToGH_Fresh.gha").read_bytes() == b"plugin"
+    assert (tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha").read_bytes() == b"plugin"
 
 
 def test_saved_client_entry_survives_the_uvx_process_that_ran_setup(tmp_path, monkeypatch):
@@ -269,7 +348,7 @@ def test_upgrade_while_rhino_holds_the_plugin_gives_a_readable_error(tmp_path, m
     home(monkeypatch, tmp_path)
     archive = release(tmp_path)
     installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("codex",)))
-    library = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    library = tmp_path / "libraries" / "nuLUCA-for-Grasshopper.gha"
     library.write_bytes(b"older-loaded-plugin")
 
     def locked(source, destination):
@@ -280,7 +359,7 @@ def test_upgrade_while_rhino_holds_the_plugin_gives_a_readable_error(tmp_path, m
         installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("codex",)))
     assert "13" not in str(caught.value)
     assert library.read_bytes() == b"older-loaded-plugin"
-    assert sorted(path.name for path in library.parent.iterdir()) == ["JsonToGH_Fresh.gha", "Newtonsoft.Json.dll"]
+    assert {path.name for path in library.parent.iterdir()} == {"nuLUCA-for-Grasshopper.gha", "Newtonsoft.Json.dll"}
 
 
 def test_other_client_changes_no_client_file_and_gets_a_keyless_entry(tmp_path, monkeypatch):
@@ -309,7 +388,7 @@ def test_default_clients_follow_what_is_installed(tmp_path, monkeypatch):
 def test_archive_may_carry_third_party_notices(tmp_path, monkeypatch):
     home(monkeypatch, tmp_path)
     archive = tmp_path / "with-notices.zip"
-    plugin = {"JsonToGH_Fresh.gha": b"plugin", "Newtonsoft.Json.dll": b"dependency"}
+    plugin = {"nuLUCA-for-Grasshopper.gha": b"plugin", "Newtonsoft.Json.dll": b"dependency"}
     with zipfile.ZipFile(archive, "w") as packed:
         for name, content in plugin.items():
             packed.writestr(name, content)

@@ -3,6 +3,9 @@
 This guide is written for the coding agent doing the install. It covers Rhino 8
 on macOS and Windows. Any MCP client can use it.
 
+Setup installs the nuLUCA for Grasshopper plugin. Its components, Import to Canvas
+and Export from Canvas, appear in the `nuLUCA` tab.
+
 The plugin download currently works only on staging, for invited pilot members.
 Production is the setup default, and it returns a clear error until the download
 route is deployed there. Use `--environment staging` with a staging key.
@@ -75,19 +78,43 @@ protocol `jsontogh-bridge/1` and a `plugin_version`.
 
 | Message | Next step |
 |---|---|
-| `Start Rhino and the JsonToGH plugin first.` | The plugin has not loaded yet. Ask the member to open Grasshopper. |
+| `Start Rhino and open Grasshopper first.` | The plugin has not loaded yet. Ask the member to open Grasshopper. |
 | `No running Rhino bridge is available.` | Ask the member to open Grasshopper. If it is open, check the Libraries folder below. |
 | `Select one running Rhino bridge` | Two copies of Rhino are open. Set `NULUCA_GH_BRIDGE_PORT` or ask the member to close one. |
 
 Before importing a definition, call `canvas_preflight` to see which plugins it
-needs and which are missing. `canvas_import` will not clear a canvas that has
-objects on it unless the member agrees.
+needs, which are missing, and which components carry scripts. `canvas_import` will
+not clear a canvas that has objects on it unless the member agrees.
+
+## Code execution
+
+Definitions can run code, as any Grasshopper file with script components can. Rhino
+runs with the member's full rights, outside Claude Code's permission prompts and the
+Codex sandbox, so a script can reach things the agent itself is held back from.
+
+`canvas_import` stops at a definition that carries scripts, returns their count and
+component names, and changes nothing until you repeat it with `allow_scripts`. It
+also stops at a cluster body it cannot read, because one can hold scripts. Tell the
+member what the scripts do. For a definition from someone else, such as a shared
+model or a downloaded `.gh`, show the member what the scripts do and get their
+approval before importing it.
+
+Agent code execution is on by default, and `nuluca_status` reports it as
+`exec_enabled`. To turn it off, the member writes `false` to
+`allow-agent-code-execution` and restarts Rhino. With it off, the plugin refuses
+Python, Rhino commands and any import that carries scripts.
+
+| System | Off switch file |
+|---|---|
+| macOS | `~/Library/Application Support/JsonToGH/allow-agent-code-execution` |
+| Windows | `%LOCALAPPDATA%\JsonToGH\allow-agent-code-execution` |
 
 ## Manual install
 
 Use this when setup cannot reach the download. Unzip the archive and copy
-`JsonToGH_Fresh.gha` into the Libraries folder. Copy `Newtonsoft.Json.dll` too,
-unless the folder already has one.
+`nuLUCA-for-Grasshopper.gha` into the Libraries folder. Copy `Newtonsoft.Json.dll`
+too, unless the folder already has one. Delete `JsonToGH_Fresh.gha` from the folder
+if it is there, because two copies of the plugin must never load together.
 
 | System | Libraries folder |
 |---|---|
@@ -101,7 +128,7 @@ macOS:
 
 ```sh
 cd "$HOME/Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins/Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries"
-xattr -d com.apple.quarantine JsonToGH_Fresh.gha Newtonsoft.Json.dll
+xattr -d com.apple.quarantine nuLUCA-for-Grasshopper.gha Newtonsoft.Json.dll
 ```
 
 `xattr` reports an error for a file that has no mark. That error is harmless.
@@ -110,7 +137,7 @@ Windows PowerShell:
 
 ```powershell
 cd "$env:APPDATA\Grasshopper\Libraries"
-Unblock-File JsonToGH_Fresh.gha, Newtonsoft.Json.dll
+Unblock-File nuLUCA-for-Grasshopper.gha, Newtonsoft.Json.dll
 ```
 
 Then follow Restart and Confirmation above.

@@ -18,10 +18,14 @@ from urllib.parse import urlsplit
 import httpx
 
 PLUGIN_NAME = "nuluca-modeling"
-PLUGIN_FILES = ("JsonToGH_Fresh.gha", "Newtonsoft.Json.dll")
+# The current plugin file, then the name earlier releases used. Both share one
+# set of GUIDs, so Grasshopper must never find the two together.
+PLUGIN_BINARIES = ("nuLUCA-for-Grasshopper.gha", "JsonToGH_Fresh.gha")
+DEPENDENCY = "Newtonsoft.Json.dll"
+INSTALLED_FILES = (*PLUGIN_BINARIES, DEPENDENCY)
 # Other Grasshopper plugins load this same file from Libraries, so setup adds it
 # only when the folder has none and never replaces or removes one it did not add.
-SHARED_FILES = ("Newtonsoft.Json.dll",)
+SHARED_FILES = (DEPENDENCY,)
 ARCHIVE_DOCUMENTS = ("INSTALL.md", "LICENSE-DRAFT.txt", "THIRD-PARTY-NOTICES.txt", "SHA256SUMS")
 SERVICES = {
     "production": "https://nuluca-backend-production.up.railway.app",
@@ -205,8 +209,9 @@ def _safe_archive(payload: bytes, expected: str) -> dict[str, bytes]:
     try:
         with zipfile.ZipFile(__import__("io").BytesIO(payload)) as archive:
             names = set(archive.namelist())
-            allowed = set(PLUGIN_FILES) | set(ARCHIVE_DOCUMENTS)
-            if not set(PLUGIN_FILES).issubset(names) or not names <= allowed:
+            allowed = set(INSTALLED_FILES) | set(ARCHIVE_DOCUMENTS)
+            binaries = [name for name in PLUGIN_BINARIES if name in names]
+            if len(binaries) != 1 or DEPENDENCY not in names or not names <= allowed:
                 raise SetupError("The plugin archive has an unexpected layout.")
             for info in archive.infolist():
                 if info.filename.startswith(("/", "\\")) or ".." in Path(info.filename).parts:
@@ -216,7 +221,7 @@ def _safe_archive(payload: bytes, expected: str) -> dict[str, bytes]:
             sums = archive.read("SHA256SUMS").decode("utf-8", errors="strict")
             entries = {line.split(None, 1)[1].lstrip("* "): line.split(None, 1)[0]
                        for line in sums.splitlines() if len(line.split(None, 1)) == 2}
-            files = {name: archive.read(name) for name in PLUGIN_FILES}
+            files = {name: archive.read(name) for name in (binaries[0], DEPENDENCY)}
     except (OSError, zipfile.BadZipFile, UnicodeError) as exc:
         raise SetupError("The plugin archive is invalid.") from exc
     for name, content in files.items():
@@ -255,18 +260,42 @@ def _replace_file(destination: Path, content: bytes) -> None:
                          "Ask the member to close Rhino, then run setup again.") from exc
 
 
+def _retire_other_binary(directory: Path, files: dict[str, bytes], previous: dict, restore: dict,
+                         *, dry_run: bool) -> list[str]:
+    """Remove the plugin under its other name first, so two copies never load."""
+    notes = []
+    for name in PLUGIN_BINARIES:
+        path = directory / name
+        if name in files or not path.exists():
+            continue
+        notes.append(f"Removed {name}, the earlier plugin file, so that two copies never load.")
+        if dry_run:
+            continue
+        if name not in restore and Path(previous.get(name, "")) != path:
+            backup = _backup_dir() / name
+            _secure_dir(backup.parent)
+            shutil.copy2(path, backup)
+            restore[name] = str(backup)
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise SetupError(f"Setup could not remove {name}. Rhino may be using it. "
+                             "Ask the member to close Rhino, then run setup again.") from exc
+    return notes
+
+
 def _copy_plugin(files: dict[str, bytes], *, dry_run: bool,
                  state: dict) -> tuple[dict[str, str], dict[str, str], list[str]]:
     directory = _libraries_dir()
     previous = state.get("plugin_paths", {}) if isinstance(state.get("plugin_paths"), dict) else {}
     restore = state.get("plugin_restore", {}) if isinstance(state.get("plugin_restore"), dict) else {}
     result: dict[str, str] = {}
-    notes: list[str] = []
     if not dry_run:
         directory.mkdir(parents=True, exist_ok=True)
         for value in previous.values():
             if Path(value).parent in _stale_libraries_dirs():
                 Path(value).unlink(missing_ok=True)
+    notes = _retire_other_binary(directory, files, previous, restore, dry_run=dry_run)
     for name, content in files.items():
         destination = directory / name
         owned = name in restore or (name in previous and Path(previous[name]) == destination)
@@ -422,7 +451,7 @@ def uninstall(*, dry_run: bool = False) -> dict:
     removed: list[str] = []
     for value in state.get("plugin_paths", {}).values():
         path = Path(value)
-        if (path.name in PLUGIN_FILES and path.parent in (_libraries_dir(), *_stale_libraries_dirs())
+        if (path.name in INSTALLED_FILES and path.parent in (_libraries_dir(), *_stale_libraries_dirs())
                 and path.exists()):
             if not dry_run:
                 path.unlink()
@@ -430,7 +459,7 @@ def uninstall(*, dry_run: bool = False) -> dict:
     for name, value in state.get("plugin_restore", {}).items():
         destination = _libraries_dir() / name
         backup = Path(value)
-        if name in PLUGIN_FILES and backup.is_file():
+        if name in INSTALLED_FILES and backup.is_file():
             if not dry_run:
                 shutil.copy2(backup, destination)
                 backup.unlink()

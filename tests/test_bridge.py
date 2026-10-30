@@ -1,4 +1,4 @@
-"""Member canvas calls cross the live bridge contract, never an exec route."""
+"""Member canvas calls cross the live bridge contract with the wheel's own tools."""
 
 import json
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from nuluca_modeling_connect.bridge import BridgeClient, BridgeError
-from nuluca_modeling_connect.local import LocalTools, local_tools
+from nuluca_modeling_connect.local import LocalTools, local_tools, script_report
 
 
 def discovery(tmp_path: Path, *, pid: int | None = None) -> Path:
@@ -15,13 +15,13 @@ def discovery(tmp_path: Path, *, pid: int | None = None) -> Path:
     path = tmp_path / "bridge-6500.json"
     path.write_text(json.dumps({"protocol": "jsontogh-bridge/1", "port": 6500,
                                 "token": "a" * 64, "pid": pid or os.getpid(),
-                                "instance_id": "bridge-1", "exec_enabled": False}))
+                                "instance_id": "bridge-1", "exec_enabled": True}))
     path.chmod(0o600)
     return path
 
 
 @pytest.mark.asyncio
-async def test_member_tools_use_token_and_no_exec(tmp_path):
+async def test_member_tools_use_token_and_the_wheel_adds_no_python_tool(tmp_path):
     discovery(tmp_path)
     work = tmp_path / "work"
     work.mkdir()
@@ -76,7 +76,7 @@ async def test_multiple_live_bridges_require_a_port(tmp_path, monkeypatch):
     second = tmp_path / "bridge-6501.json"
     second.write_text(json.dumps({"protocol": "jsontogh-bridge/1", "port": 6501,
                                   "token": "b" * 64, "pid": os.getpid(),
-                                  "instance_id": "bridge-2", "exec_enabled": False}))
+                                  "instance_id": "bridge-2", "exec_enabled": True}))
     second.chmod(0o600)
     with pytest.raises(BridgeError, match="Select one running Rhino bridge"):
         await BridgeClient(root=tmp_path).call("GET", "/status")
@@ -142,7 +142,7 @@ async def test_preflight_sends_the_definition_and_reports_what_is_missing(tmp_pa
     local, requests = canvas(tmp_path, routes={"/preflight": httpx.Response(200, json=report)})
     result = await local.call("canvas_preflight", {"file": "stair.json"})
 
-    assert result == report
+    assert result == {**report, "script_count": 0, "script_components": [], "unreadable_cluster_bodies": []}
     assert requests[-1].method == "POST"
     assert json.loads(requests[-1].content)["Version"] == "1.3"
 
@@ -165,5 +165,79 @@ async def test_installed_plugins_are_readable(tmp_path):
 def test_tool_descriptions_tell_the_agent_about_clearing_and_preflight():
     tools = {item["name"]: item for item in local_tools()}
     assert "canvas_not_empty" in tools["canvas_import"]["description"]
-    assert set(tools["canvas_import"]["inputSchema"]["properties"]) == {"file", "replace_canvas", "add_to_canvas"}
+    assert set(tools["canvas_import"]["inputSchema"]["properties"]) == {
+        "file", "replace_canvas", "add_to_canvas", "allow_scripts"}
     assert tools["canvas_preflight"]["inputSchema"]["required"] == ["file"]
+
+
+SCRIPTED = {"Version": "1.3", "Components": [
+    {"Type": "C# Script", "NickName": "Pattern", "ScriptSource": "Print(1);", "UsingCode": "using System;"},
+    {"Type": "Python 3 Script", "ScriptConfig": {"ScriptSource": "print(1)"}},
+    {"Type": "Addition", "NickName": "Sum"},
+    {"Type": "Cluster", "NickName": "Inner", "Cluster": {"Document": {"Components": [
+        {"Type": "C# Script", "NickName": "Nested", "ScriptCode": "x"}]}}},
+    {"Type": "Cluster", "NickName": "Sealed", "Cluster": {"NativeDocument": "QUJD"}},
+]}
+
+
+def test_script_report_counts_components_and_names_them():
+    assert script_report(SCRIPTED) == {
+        "script_count": 3, "script_components": ["Nested", "Pattern", "Python 3 Script"],
+        "unreadable_cluster_bodies": ["Sealed"]}
+
+
+def test_blank_source_is_not_a_script():
+    definition = {"Components": [{"Type": "C# Script", "ScriptSource": "  ", "Cluster": {"NativeDocument": ""}}]}
+    assert script_report(definition)["script_count"] == 0
+    assert script_report(definition)["unreadable_cluster_bodies"] == []
+
+
+@pytest.mark.asyncio
+async def test_import_names_the_scripts_before_anything_runs(tmp_path):
+    local, requests = canvas(tmp_path, status={"component_count": 0})
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+
+    result = await local.call("canvas_import", {"file": "scripted.json"})
+
+    assert result["warning"] == "definition_has_scripts"
+    assert result["script_count"] == 3
+    assert "Pattern" in result["script_components"]
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_cluster_body_also_stops_for_review(tmp_path):
+    local, requests = canvas(tmp_path)
+    (tmp_path / "work" / "sealed.json").write_text(json.dumps({"Components": [SCRIPTED["Components"][4]]}))
+    result = await local.call("canvas_import", {"file": "sealed.json"})
+    assert result["warning"] == "definition_has_scripts"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_allow_scripts_imports_and_the_canvas_check_still_applies(tmp_path):
+    local, requests = canvas(tmp_path, status={"component_count": 2})
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+
+    blocked = await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": True})
+    assert blocked["warning"] == "canvas_not_empty"
+    await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": True, "replace_canvas": True})
+    assert requests[-1].url.path == "/import"
+
+
+@pytest.mark.asyncio
+async def test_truthy_strings_do_not_allow_scripts(tmp_path):
+    local, requests = canvas(tmp_path)
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+    result = await local.call("canvas_import", {"file": "scripted.json", "allow_scripts": "yes"})
+    assert result["warning"] == "definition_has_scripts"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_preflight_reports_scripts_even_on_an_older_plugin(tmp_path):
+    local, _ = canvas(tmp_path, routes={"/preflight": httpx.Response(404, json={})})
+    (tmp_path / "work" / "scripted.json").write_text(json.dumps(SCRIPTED))
+    result = await local.call("canvas_preflight", {"file": "scripted.json"})
+    assert result["error"] == "preflight_unavailable"
+    assert result["script_count"] == 3
