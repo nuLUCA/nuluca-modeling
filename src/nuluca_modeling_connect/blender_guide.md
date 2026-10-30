@@ -43,7 +43,8 @@ Modeling is a conversation, and quick rounds beat one long attempt.
    set the next change.
 
 Keep the first version small. Use a low count or a coarse mesh until the logic is
-right, because 180 fins can quietly become 32,400 and a count check costs a second.
+right. A wiring mistake can multiply a count a hundredfold, and a count check costs
+a second.
 
 A long run returns `status: running` with a run id. Check it with `blender_status`
 and its `run` argument, and stop it with `blender_cancel` as soon as it is going
@@ -84,7 +85,7 @@ If the model claims to be a physical object:
 - every part sits on or connects to something, in a path that reaches the ground or a
   stated host;
 - parts touch where they should and overlap only where a joint says so;
-- parts have real thicknesses, and materials stay separate;
+- parts have thicknesses they could be built at, and materials stay separate;
 - joints show how the thing goes together.
 
 `blender_inspect` reports open edges, non-manifold edges, loose vertices and

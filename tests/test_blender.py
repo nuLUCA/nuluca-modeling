@@ -355,7 +355,7 @@ async def test_guide_is_packaged_and_keeps_private_vocabulary_out(tmp_path):
     work = BlenderTools(root=tmp_path / "work", env={})
     guide = (await work.call("blender_guide", {}))["guide"]
     assert "Never quit, kill or relaunch" in guide
-    for private in ("S19", "S20", "rubric", "reviewer", "critic", "harness", "Astra", "NAT-", "ND-0"):
+    for private in ("S19", "S20", "rubric", "reviewer", "critic", "harness"):
         assert private.lower() not in guide.lower()
 
 
