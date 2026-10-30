@@ -37,9 +37,10 @@ DEFAULT_URL = SERVICES["production"]
 CONFIGURED_CLIENTS = ("claude", "codex")
 # Any other MCP client: setup changes no client file and returns the stdio entry.
 OTHER_CLIENT = "other"
-SCRIPT_TOOL = "canvas_import_scripts"
+# Tools that execute supplied code. Each keeps its own prompt under --always-allow-tools.
+SCRIPT_TOOLS = ("canvas_import_scripts",)
 CLAUDE_SERVER_RULE = f"mcp__{PLUGIN_NAME}"
-CLAUDE_SCRIPT_RULE = f"{CLAUDE_SERVER_RULE}__{SCRIPT_TOOL}"
+CLAUDE_SCRIPT_RULES = tuple(f"{CLAUDE_SERVER_RULE}__{tool}" for tool in SCRIPT_TOOLS)
 APPROVAL_CHOICE = ("Ask the member once whether to work with no client prompts while they are away. "
                    "--always-allow-tools covers every nuLUCA tool except script imports, and --always-allow-scripts "
                    "covers script imports. Both last across sessions, and the --no- forms remove them.")
@@ -398,16 +399,17 @@ def _set_claude_rules(*, allow_tools: bool, allow_scripts: bool, dry_run: bool) 
             raise ValueError
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         raise SetupError("Claude Code settings could not be read safely.") from exc
-    wanted = {CLAUDE_SERVER_RULE: allow_tools, CLAUDE_SCRIPT_RULE: allow_scripts}
+    wanted = {CLAUDE_SERVER_RULE: allow_tools, **dict.fromkeys(CLAUDE_SCRIPT_RULES, allow_scripts)}
     changed = False
     for rule, present in wanted.items():
         if (rule in allow) != present:
             allow.append(rule) if present else allow.remove(rule)
             changed = True
     ask_for_scripts = allow_tools and not allow_scripts
-    if (CLAUDE_SCRIPT_RULE in ask) != ask_for_scripts:
-        ask.append(CLAUDE_SCRIPT_RULE) if ask_for_scripts else ask.remove(CLAUDE_SCRIPT_RULE)
-        changed = True
+    for rule in CLAUDE_SCRIPT_RULES:
+        if (rule in ask) != ask_for_scripts:
+            ask.append(rule) if ask_for_scripts else ask.remove(rule)
+            changed = True
     if not ask:
         del permissions["ask"]
     if changed and not dry_run:
@@ -441,12 +443,25 @@ def _toml(value: str) -> str:
     return json.dumps(value)
 
 
+def _codex_script_mode(existing: str, tool: str, *, always_allow: bool, keep_member_choice: bool) -> str:
+    """Codex keeps "don't ask me again" only in auto mode, where annotations decide the prompt.
+
+    prompt mode would turn that answer into a one-time approval, so it is not used.
+    An answer the member already gave at the prompt is in the table and survives a rerun.
+    """
+    answered = re.search(rf'^\[mcp_servers\.nuluca-modeling\.tools\.{tool}\]\napproval_mode\s*=\s*"approve"',
+                         existing, re.MULTILINE)
+    return "approve" if always_allow or (keep_member_choice and answered) else "auto"
+
+
 def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, always_allow_tools: bool,
-                     always_allow_scripts: bool, dry_run: bool) -> Path:
+                     always_allow_scripts: bool, keep_member_choice: bool, dry_run: bool) -> Path:
     path = _codex_config()
     existing = path.read_text() if path.exists() else ""
     # A server table continues until the next table. Remove this exact server and
     # its nested env table so a rerun is an upgrade, never a second registration.
+    script_modes = {tool: _codex_script_mode(existing, tool, always_allow=always_allow_scripts,
+                                             keep_member_choice=keep_member_choice) for tool in SCRIPT_TOOLS}
     existing = re.sub(_CODEX_TABLES, "", existing).rstrip()
     block = "\n".join((
         "[mcp_servers.nuluca-modeling]",
@@ -458,9 +473,11 @@ def _configure_codex(key: str, command: str, args: list[str], *, base_url: str, 
         f"NULUCA_AGENT_CONNECT_URL = {_toml(base_url)}",
         f"NULUCA_AGENT_CONNECT_KEY = {_toml(key)}",
         "",
-        f"[mcp_servers.nuluca-modeling.tools.{SCRIPT_TOOL}]",
-        f'approval_mode = "{"approve" if always_allow_scripts else "prompt"}"',  # outranks the server default
-        "",
+        *(line for tool, mode in script_modes.items() for line in (
+            f"[mcp_servers.nuluca-modeling.tools.{tool}]",
+            f'approval_mode = "{mode}"',  # outranks the server default
+            "",
+        )),
     ))
     if not dry_run:
         _atomic_write(path, (existing + "\n\n" if existing else "") + block)
@@ -510,6 +527,7 @@ def setup(options: SetupOptions) -> dict:
         elif client == "codex":
             path = _configure_codex(options.key, command, args, base_url=base_url,
                                     always_allow_tools=allow_tools, always_allow_scripts=allow_scripts,
+                                    keep_member_choice=options.always_allow_scripts is None,
                                     dry_run=options.dry_run)
             configs[client] = str(path)
     if not options.dry_run:

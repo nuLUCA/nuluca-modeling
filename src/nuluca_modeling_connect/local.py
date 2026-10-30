@@ -65,6 +65,18 @@ _DESCRIPTIONS = {
                               "when it solves, outside your sandbox. Tell the member what they do first, and get their "
                               "approval for a definition that came from someone else. canvas_not_empty applies here too."),
 }
+_READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
+_CHANGES_CANVAS = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}
+_ADDS = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+_VIEW_ONLY = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+_ANNOTATIONS = {
+    "viewport_zoom_extents": _VIEW_ONLY, "viewport_set_camera": _VIEW_ONLY, "viewport_set_display_mode": _VIEW_ONLY,
+    "canvas_set_preview": _VIEW_ONLY, "canvas_recompute": _VIEW_ONLY,
+    "canvas_new": _ADDS, "canvas_bake": _ADDS,
+    "canvas_preflight": _READ_ONLY,
+    # Scripts reach whatever the member's own account can, so this is the open-world tool.
+    "canvas_import_scripts": {**_CHANGES_CANVAS, "openWorldHint": True},
+}
 _NOT_EMPTY = ("The canvas has objects on it, and importing would clear them. Ask the member, then repeat with "
               "replace_canvas true to clear them, or add_to_canvas true to keep them. Nothing has changed.")
 _HAS_SCRIPTS = ("This definition runs code when it solves, and Rhino runs it outside your sandbox. Tell the member "
@@ -84,6 +96,7 @@ def local_tools() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {
                 **{key: {"type": kind} for key, kind in fields.items()}, **_OPTIONAL.get(name, {}),
             }, "required": list(fields), "additionalProperties": True},
+            "annotations": _ANNOTATIONS.get(name, _READ_ONLY if name in _READ else _CHANGES_CANVAS),
         })
     return tools
 

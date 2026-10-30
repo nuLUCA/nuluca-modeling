@@ -272,3 +272,29 @@ async def test_a_script_import_that_cannot_be_recorded_does_not_run(tmp_path):
     with pytest.raises(BridgeError, match="could not be recorded"):
         await local.call("canvas_import_scripts", {"file": "scripted.json", "replace_canvas": True})
     assert all(request.url.path != "/import" for request in requests)
+
+
+def test_annotations_match_what_each_tool_does():
+    from mcp.types import Tool
+
+    tools = {item["name"]: Tool(**item).annotations for item in local_tools()}
+    assert tools["canvas_status"].readOnlyHint is True
+    assert tools["canvas_preflight"].readOnlyHint is True
+    assert tools["canvas_import"].destructiveHint is True
+    assert tools["canvas_import"].openWorldHint is False
+    assert tools["canvas_import_scripts"].destructiveHint is True
+    assert tools["canvas_import_scripts"].openWorldHint is True
+    assert tools["viewport_set_camera"].destructiveHint is False
+    assert all(item is not None for item in tools.values())
+
+
+def test_codex_auto_mode_prompts_for_the_script_tool_alone_among_imports():
+    """Mirrors Codex requires_mcp_tool_approval: destructive or open world asks, read-only never does."""
+    tools = {item["name"]: item["annotations"] for item in local_tools()}
+
+    def prompts(hint):
+        return not hint.get("readOnlyHint") and (hint.get("destructiveHint", True) or hint.get("openWorldHint", True))
+
+    assert prompts(tools["canvas_import_scripts"])
+    assert not prompts(tools["canvas_preflight"])
+    assert not prompts(tools["canvas_status"])

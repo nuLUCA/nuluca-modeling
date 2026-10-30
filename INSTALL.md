@@ -112,11 +112,18 @@ sessions, and the `--no-` form or `--uninstall` removes it.
 | `--always-allow-tools` | Every nuLUCA tool runs with no client prompt, except script imports |
 | `--always-allow-scripts` | `canvas_import_scripts` runs with no client prompt |
 
-| Client | What setup writes |
+| Client | Permanent setting |
 |---|---|
-| Claude Code | Rules in `permissions.allow`, and `permissions.ask` while scripts still prompt, in `~/.claude/settings.json` |
-| Codex | `default_tools_approval_mode` for the server, and `approval_mode` for `canvas_import_scripts`, in `config.toml` |
-| Other clients | Use that client's own approval setting |
+| Claude Code | `mcp__nuluca-modeling__canvas_import_scripts` in `permissions.allow` in `~/.claude/settings.json`. With `--always-allow-tools`, setup also adds `mcp__nuluca-modeling`. It keeps script imports asking with a `permissions.ask` rule, which outranks an allow rule. |
+| Codex | `approval_mode = "approve"` under `[mcp_servers.nuluca-modeling.tools.canvas_import_scripts]` in `config.toml`. Answering "Allow and don't ask me again" at the prompt writes the same line, and setup keeps it. With `--always-allow-tools`, setup also sets `default_tools_approval_mode = "approve"`. |
+| Other clients | Use that client's own approval setting. Setup writes nothing for them. |
+
+Setup writes a permission only when the member chooses it.
+
+With no standing permission, a run that nobody is watching gets a refusal, and the
+call does not happen. `claude -p` and Codex with `approval_policy = "never"` both
+refuse such a call. For modeling while the member is away, ask them about both
+options.
 
 With `--always-allow-scripts` on, the client stops asking, so your duty to show the
 member the scripts in someone else's definition is the only remaining check. Each

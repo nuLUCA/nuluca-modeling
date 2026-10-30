@@ -47,7 +47,8 @@ def workbench_tools() -> list[dict]:
                  "updates": {"type": "object", "description": "Exact JsonToGH node fields to update."},
                  "extra": {"type": "object", "description": "Exact JsonToGH parameter fields, including Slider or Value."},
                  "script": {"type": "object", "description": "Complete JsonToGH v1.3 definition with Components, Parameters, Connections and Groups arrays."}},
-                 "required": fields, "additionalProperties": True}}
+                 "required": fields, "additionalProperties": True},
+             "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False}}
             for name in _NAMES for fields in [required.get(name, ["file"])]]
 
 

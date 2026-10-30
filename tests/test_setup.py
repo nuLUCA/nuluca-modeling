@@ -439,7 +439,7 @@ def test_clients_ask_before_script_imports_by_default(tmp_path, monkeypatch):
     home(monkeypatch, tmp_path)
     result = installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude", "codex")))
 
-    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "auto"
     assert not (tmp_path / "home/.claude/settings.json").exists()
     assert result["approvals"] == {"always_allow_tools": False, "always_allow_scripts": False,
                                    "next_step": installer.APPROVAL_CHOICE}
@@ -465,7 +465,7 @@ def test_always_allow_is_the_member_choice_and_lasts_across_setup_runs(tmp_path,
 
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=False))
     assert json.loads(settings.read_text())["permissions"]["allow"] == ["Bash(ls)"]
-    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "auto"
 
 
 def test_uninstall_removes_always_allow_and_every_codex_table(tmp_path, monkeypatch):
@@ -507,7 +507,7 @@ def test_unattended_tools_keep_the_script_prompt_until_it_is_chosen_too(tmp_path
     assert rules["ask"] == ["mcp__nuluca-modeling__canvas_import_scripts"]
     table = codex_table(tmp_path)
     assert table["default_tools_approval_mode"] == "approve"
-    assert table["tools"]["canvas_import_scripts"]["approval_mode"] == "prompt"
+    assert table["tools"]["canvas_import_scripts"]["approval_mode"] == "auto"
 
     installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", clients, always_allow_scripts=True))
     rules = json.loads(settings.read_text())["permissions"]
@@ -519,3 +519,24 @@ def test_unattended_tools_keep_the_script_prompt_until_it_is_chosen_too(tmp_path
                                            always_allow_scripts=False))
     assert json.loads(settings.read_text())["permissions"]["allow"] == []
     assert "default_tools_approval_mode" not in codex_table(tmp_path)
+
+
+def test_codex_keeps_a_dont_ask_again_answer_through_a_rerun(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = str(release(tmp_path))
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", ("codex",)))
+    config = tmp_path / "home/.codex/config.toml"
+    config.write_text(config.read_text().replace('approval_mode = "auto"', 'approval_mode = "approve"'))
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", ("codex",)))
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "approve"
+
+    installer.setup(installer.SetupOptions(archive, None, "ae_test_secret", ("codex",), always_allow_scripts=False))
+    assert codex_table(tmp_path)["tools"]["canvas_import_scripts"]["approval_mode"] == "auto"
+
+
+def test_codex_never_gets_prompt_mode_which_would_discard_the_members_answer(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",),
+                                           always_allow_tools=True))
+    assert 'approval_mode = "prompt"' not in (tmp_path / "home/.codex/config.toml").read_text()
