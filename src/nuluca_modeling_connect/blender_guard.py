@@ -3,7 +3,8 @@
 An audit hook keeps ordinary Python file access in the modeling work folder and
 refuses network and process calls, so a mistaken or misled script fails with a
 clear error. This is a guard rail. It sees Python-level calls only: Blender's own
-save, render and export operators and native code through ctypes pass beneath it.
+file operators and native code pass beneath it, and a script written to defeat it
+can get past it.
 """
 
 import atexit
@@ -17,6 +18,9 @@ HOME = os.path.realpath(os.environ["NULUCA_BLENDER_MEMBER_HOME"])
 INSTALL = os.path.realpath(os.environ["NULUCA_BLENDER_INSTALL_ROOT"])
 READABLE = (WORK, INSTALL, os.path.realpath(sys.prefix), os.path.realpath(sys.base_prefix))
 _CASE = os.path.normcase
+_REAL = os.path.realpath
+_DECODE = os.fsdecode
+_IS_DIR = os.path.isdir
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 _DEVICES = {_CASE(os.path.realpath(os.devnull))}
 
@@ -33,7 +37,8 @@ def _inside(path, roots):
 def _resolved(path):
     if isinstance(path, int) or path is None:
         return None
-    return os.path.realpath(os.fsdecode(path))
+    resolved = _REAL(_DECODE(path))
+    return resolved[4:] if resolved.startswith("\\\\?\\") else resolved
 
 
 def _writable(path):
@@ -44,7 +49,11 @@ def _writable(path):
 
 def _readable(path):
     path = _resolved(path)
-    if path is not None and _inside(path, (HOME,)) and not _inside(path, READABLE):
+    if path is None:
+        return
+    private = _inside(path, (HOME,)) or path.startswith("/proc/") and not path.startswith("/proc/self")
+    # A directory descriptor would let later relative opens skip this check.
+    if (private or _IS_DIR(path)) and not _inside(path, READABLE):
         raise PermissionError("nuLUCA Blender guard: reading outside the modeling work folder is refused: " + path)
 
 
@@ -70,6 +79,11 @@ def _first_readable(args):
     _readable(args[0] if args else ".")
 
 
+def _database(args):
+    if args[0] != ":memory:":
+        _writable(args[0])
+
+
 def _refuse(what):
     def refuse(_args):
         raise PermissionError("nuLUCA Blender guard: " + what + " is refused in a modeling script.")
@@ -84,6 +98,8 @@ _HANDLERS = {
     "os.truncate": _first_writable, "os.chmod": _first_writable, "os.chown": _first_writable,
     "os.utime": _first_writable, "os.rename": _two_writable, "os.link": _two_writable,
     "os.symlink": _two_writable,
+    "os.chflags": _first_writable, "os.setxattr": _first_writable, "os.removexattr": _first_writable,
+    "sqlite3.connect": _database,
 }
 for _event in ("subprocess.Popen", "os.system", "os.exec", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn",
                "os.startfile", "pty.spawn"):
@@ -92,6 +108,8 @@ for _event in ("socket.__new__", "socket.connect", "socket.bind", "socket.getadd
                "socket.sendto", "urllib.Request", "http.client.connect", "ftplib.connect", "smtplib.connect",
                "webbrowser.open"):
     _HANDLERS[_event] = _refuse("network access")
+for _event in ("os.kill", "os.killpg", "signal.pthread_kill"):
+    _HANDLERS[_event] = _refuse("signalling another process")
 
 
 def _audit(event, args):

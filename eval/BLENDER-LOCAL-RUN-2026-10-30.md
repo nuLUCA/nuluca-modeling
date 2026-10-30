@@ -13,7 +13,7 @@ The model is a small Geometry Nodes field: cubes instanced on a grid with `Count
 | `blender_inspect` | 0.78 | 259 | 64 instances, both controls listed |
 | `blender_preview` | 1.02 | 382 | One 800 × 600 view, checked by eye |
 | `blender_vary` (2 and 64) | 1.03 | 268 | 4 and 4,096 instances, unchanged on reopen |
-| `blender_export` glb | 0.78 | 264 | 768 triangles read back of 768, bounds delta 0 |
+| `blender_export` glb | 0.78 | 264 | 768 of 768 triangles read back, bounds delta 0 |
 | `blender_export` usd | 0.78 | 266 | Completed |
 | `blender_export` stl | 0.78 | 257 | Completed |
 | `blender_export` obj | 0.77 | 257 | Completed |
@@ -43,6 +43,19 @@ not carry it.
 
 `bpy.ops.wm.save_as_mainfile` wrote a `.blend` outside the work folder, as the README
 says it can. Blender's own operators pass beneath the guard.
+
+## Independent review
+
+An adversarial read of the first version found that a script could make the wheel
+return or overwrite files outside the work folder through links in its run folder,
+that a plain `.blend` could write files during a preview, and that a tampered run
+folder could wedge the server. All three are fixed, with regression tests. Script
+bypasses of the guard that remain are stated limits: `_posixsubprocess`, walking
+`gc` to clear the hook, `os.mkfifo`, and C-level operators such as
+`bpy.data.texts.load`.
+
+A millimetre scene exported a 2 mm cube as a 2 m GLB, because the exporter ignores
+the unit scale. The export step now scales to metres and compares in metres.
 
 ## Not covered
 

@@ -12,10 +12,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -47,7 +49,13 @@ _MAX_CASES = 12
 _MAX_ARTIFACTS = 500
 _MAX_INLINE_IMAGES = 3
 _MAX_IMAGE_SIDE = 2000
+_MAX_MEMORY_GB = 512.0
+_MAX_RESULT_BYTES = 8 * 1024 * 1024
+_MAX_IMAGE_BYTES = 16 * 1024 * 1024
+_PNG = b"\x89PNG\r\n\x1a\n"
 _CASE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_RESERVED_NAME = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])$", re.IGNORECASE)
+_IMAGE_NAME = re.compile(r"^[a-z]+\.png$")
 _VIEWS = ("iso", "front", "back", "left", "right", "top", "bottom")
 _FORMATS = ("glb", "usd", "stl", "obj")
 _FILE = {"type": "string", "description": "Path relative to the modeling work folder."}
@@ -139,6 +147,34 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _open_regular(path: Path):
+    """Open a file a script may have replaced. Links, pipes and devices are refused."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        if path.is_symlink():
+            return None
+        stream = os.fdopen(os.open(path, flags), "rb")
+    except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        stream.close()
+        return None
+    return stream
+
+
+def _read_regular(path: Path, limit: int, *, tail: bool = False) -> bytes | None:
+    stream = _open_regular(path)
+    if stream is None:
+        return None
+    with stream:
+        size = os.fstat(stream.fileno()).st_size
+        if tail:
+            stream.seek(max(0, size - limit))
+        elif size > limit:
+            return None
+        return stream.read(limit)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -151,6 +187,8 @@ class _Run:
         self.process: subprocess.Popen | None = None
         self.stop_reason: str | None = None
         self.receipt: dict = {}
+        self.result: dict | None = None
+        self.images: list[str] = []
         self.started = time.monotonic()
 
 
@@ -270,11 +308,10 @@ class BlenderTools:
         receipt.update({"source_sha256": _sha(source), "guard_sha256": _sha(guard), "command": command,
                         "memory_limit_gb": run.limit_gb})
         run.receipt = receipt
-        receipt_path = folder / "execution.json"
         if not receipt["commit_gate"]["ok"]:
             self._finish(run, "halted_commit_gate", None)
             return
-        receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        self._write_receipt(run)
         job = memory.ProcessMemoryJob(run.limit_gb)
         log = (folder / "process.log").open("w")
         try:
@@ -284,14 +321,38 @@ class BlenderTools:
             job.close()
             log.close()
             raise
-        receipt["memory_job"] = job.assign(run.process)
         run.started = time.monotonic()
-        threading.Thread(target=self._monitor, args=(run, job, log), daemon=True).start()
+        try:
+            receipt["memory_job"] = job.assign(run.process)
+            threading.Thread(target=self._monitor, args=(run, job, log), daemon=True).start()
+        except BaseException:
+            self._stop(run.process)
+            job.close()
+            log.close()
+            raise
 
     def _monitor(self, run: _Run, job: memory.ProcessMemoryJob, log) -> None:
+        process = run.process
+        peak = 0
+        try:
+            peak = self._watch(run, process)
+            code = process.wait()
+        except Exception as exc:
+            run.stop_reason = run.stop_reason or "monitor_failed_artifacts_preserved"
+            run.receipt["monitor_error"] = type(exc).__name__
+            self._stop(process)
+            code = process.poll()
+        finally:
+            log.close()
+        run.receipt["memory_job_peak_bytes"] = job.peak_bytes()
+        job.close()
+        run.receipt["peak_rss_bytes"] = self._reported_peak(run) or peak or None
+        self._finish(run, run.stop_reason or ("process_completed" if code == 0
+                                              else "process_failed_artifacts_preserved"), code)
+
+    def _watch(self, run: _Run, process: subprocess.Popen) -> int:
         peak = 0
         last_sample = 0.0
-        process = run.process
         while process.poll() is None:
             now = time.monotonic()
             if run.stop_reason is None and now - run.started > run.timeout:
@@ -309,21 +370,14 @@ class BlenderTools:
                 self._stop(process)
                 break
             time.sleep(_POLL_SECONDS)
-        code = process.wait()
-        log.close()
-        peak_job = job.peak_bytes()
-        job.close()
-        run.receipt["memory_job_peak_bytes"] = peak_job
-        run.receipt["peak_rss_bytes"] = self._reported_peak(run) or peak or None
-        status = run.stop_reason or ("process_completed" if code == 0 else "process_failed_artifacts_preserved")
-        self._finish(run, status, code)
+        return peak
 
     @staticmethod
     def _reported_peak(run: _Run) -> int | None:
         """The guard records Blender's own high-water mark at exit. A stopped run has only the samples."""
         try:
-            return int((run.folder / "peak-rss-bytes.txt").read_text())
-        except (OSError, ValueError):
+            return int(_read_regular(run.folder / "peak-rss-bytes.txt", 32) or b"")
+        except ValueError:
             return None
 
     @staticmethod
@@ -335,19 +389,76 @@ class BlenderTools:
         except subprocess.TimeoutExpired:
             process.kill()
 
+    def _intact(self, run: _Run) -> bool:
+        """A script can move folders inside the work folder. Nothing is read or written through a swapped path."""
+        try:
+            return run.folder.resolve() == self.root / _RUNS / run.id and not run.folder.is_symlink()
+        except OSError:
+            return False
+
+    def _write_receipt(self, run: _Run) -> None:
+        if not self._intact(run):
+            return
+        target = run.folder / "execution.json"
+        temporary = run.folder / f".execution-{uuid.uuid4().hex}.json"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(temporary, flags, 0o600), "w", encoding="utf-8") as stream:
+            json.dump(run.receipt, stream, indent=2)
+        os.replace(temporary, target)
+
+    def _artifact_records(self, run: _Run) -> tuple[list[dict], bool]:
+        base = run.folder / "artifacts"
+        if not self._intact(run) or base.is_symlink():
+            return [], False
+        names = sorted(Path(folder) / name for folder, _dirs, files in os.walk(base) for name in files)
+        records = []
+        for path in names[:_MAX_ARTIFACTS]:
+            stream = _open_regular(path)
+            if stream is None:
+                continue
+            digest = hashlib.sha256()
+            with stream:
+                try:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                    records.append({"path": self._relative(path), "bytes": stream.tell(),
+                                    "sha256": digest.hexdigest()})
+                except OSError:
+                    continue
+        return records, len(names) > _MAX_ARTIFACTS
+
+    def _collect_result(self, run: _Run) -> None:
+        """Read a fixed step's output once, when it ends. Later scripts can rewrite the run folder."""
+        if run.kind == "script" or not self._intact(run):
+            return
+        artifacts = run.folder / "artifacts"
+        try:
+            run.result = json.loads(_read_regular(artifacts / "result.json", _MAX_RESULT_BYTES) or b"null")
+        except ValueError:
+            run.result = None
+        images = run.result.get("images") if run.kind == "preview" and isinstance(run.result, dict) else None
+        for item in (images or [])[:_MAX_INLINE_IMAGES]:
+            name = item.get("file") if isinstance(item, dict) else None
+            data = _read_regular(artifacts / name, _MAX_IMAGE_BYTES) if (
+                isinstance(name, str) and _IMAGE_NAME.fullmatch(name)) else None
+            if data and data.startswith(_PNG):
+                run.images.append(base64.b64encode(data).decode())
+
     def _finish(self, run: _Run, status: str, code: int | None) -> None:
         receipt = run.receipt
         receipt.update({"status": status, "exit_code": code, "finished_at": _now(),
                         "elapsed_seconds": round(time.monotonic() - run.started, 3)})
-        files = sorted(item for item in (run.folder / "artifacts").rglob("*") if item.is_file())
-        receipt["artifacts"] = [{"path": self._relative(item), "bytes": item.stat().st_size, "sha256": _sha(item)}
-                                for item in files[:_MAX_ARTIFACTS]]
-        receipt["artifacts_truncated"] = len(files) > _MAX_ARTIFACTS
-        (run.folder / "execution.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-        with self._lock:
-            if self._active is run:
-                self._active = None
-        run.done.set()
+        try:
+            receipt["artifacts"], receipt["artifacts_truncated"] = self._artifact_records(run)
+            self._collect_result(run)
+            self._write_receipt(run)
+        except Exception as exc:
+            receipt["finish_error"] = type(exc).__name__
+        finally:
+            with self._lock:
+                if self._active is run:
+                    self._active = None
+            run.done.set()
 
     def close(self) -> None:
         """Called when the server stops, so no background Blender outlives it."""
@@ -365,26 +476,20 @@ class BlenderTools:
         receipt = run.receipt
         report = {key: receipt.get(key) for key in ("run", "kind", "status", "exit_code", "elapsed_seconds",
                                                     "peak_rss_bytes", "memory_job_peak_bytes", "memory_job",
-                                                    "artifacts", "artifacts_truncated")}
+                                                    "artifacts", "artifacts_truncated", "finish_error")}
         report["receipt"] = self._relative(run.folder / "execution.json")
-        result_path = run.folder / "artifacts" / "result.json"
-        if run.kind != "script" and result_path.is_file():
-            try:
-                report["result"] = json.loads(result_path.read_text())
-            except ValueError:
-                report["result"] = None
+        if run.kind != "script":
+            report["result"] = run.result
+        if run.images:
+            report["_images"] = list(run.images)
         if receipt.get("status") != "process_completed":
             report["log_tail"] = self._log_tail(run)
         return report
 
     def _log_tail(self, run: _Run) -> str:
-        try:
-            with (run.folder / "process.log").open("rb") as stream:
-                stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - _LOG_TAIL))
-                return stream.read().decode("utf-8", "replace")
-        except OSError:
+        if not self._intact(run):
             return ""
+        return (_read_regular(run.folder / "process.log", _LOG_TAIL, tail=True) or b"").decode("utf-8", "replace")
 
     def _find_run(self, run_id: object) -> _Run:
         run = self._runs.get(run_id) if isinstance(run_id, str) else None
@@ -393,11 +498,13 @@ class BlenderTools:
         return run
 
     @staticmethod
-    def _wait_time(args: dict) -> float:
-        value = args.get("wait_seconds", _WAIT_DEFAULT)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
-            raise BlenderError("wait_seconds must be zero or more.")
-        return min(float(value), 600.0)
+    def _number(value: object, name: str, low: float, high: float) -> float:
+        if type(value) not in (int, float) or not math.isfinite(value) or value < low:
+            raise BlenderError(f"{name} must be a number of at least {low:g}.")
+        return min(float(value), high)
+
+    def _wait_time(self, args: dict) -> float:
+        return self._number(args.get("wait_seconds", _WAIT_DEFAULT), "wait_seconds", 0, 600)
 
     def _step(self, step: str, request: dict, args: dict, *, inputs: tuple[Path, ...] = ()) -> dict:
         code = resources.files(__package__).joinpath("blender_steps.py").read_bytes()
@@ -406,29 +513,22 @@ class BlenderTools:
                           extra={"dependencies": [{"path": self._relative(item), "sha256": _sha(item),
                                                    "bytes": item.stat().st_size} for item in inputs]})
         run.done.wait(self._wait_time(args))
-        return self._with_images(run, self._report(run))
-
-    def _with_images(self, run: _Run, report: dict) -> dict:
-        images = (report.get("result") or {}).get("images") if run.kind == "preview" else None
-        if images:
-            report["_images"] = [base64.b64encode((run.folder / "artifacts" / item["file"]).read_bytes()).decode()
-                                 for item in images[:_MAX_INLINE_IMAGES]]
-        return report
+        return self._report(run)
 
     # Tools -----------------------------------------------------------------
 
     def _status(self, args: dict) -> dict:
         if args.get("run") is not None:
-            run = self._find_run(args["run"])
-            return self._with_images(run, self._report(run))
+            return self._report(self._find_run(args["run"]))
         found = self._discover(bool(args.get("refresh")))
         selected = found["selected"]
+        active = self._active
         return {"selected": selected.public() if selected else None,
                 "installs": [item.public() for item in found["installs"]], "rejected": found["rejected"],
                 "work_folder": str(self.root), "python_scripts": _mode(self.env) == "on",
                 "memory": {"percent_in_use": memory.commit_percent(), "gate_percent": memory.COMMIT_GATE_DEFAULT,
                            "stop_percent": memory.COMMIT_STOP_DEFAULT, "ceiling_gb": memory.default_limit_gb()},
-                "active_run": self._active.id if self._active else None}
+                "active_run": active.id if active else None}
 
     def _write(self, args: dict) -> dict:
         path = self._path(args.get("file"), (".py",))
@@ -449,15 +549,13 @@ class BlenderTools:
         files = [(self.root / item).resolve() if isinstance(item, str) else None for item in inputs]
         if not all(path and path.is_file() and path.is_relative_to(self.root) for path in files):
             raise BlenderError("Every input must be a file in the modeling work folder.")
-        timeout = args.get("timeout_seconds", _RUN_TIMEOUT)
-        ceiling = args.get("memory_limit_gb", memory.default_limit_gb())
-        for value in (timeout, ceiling):
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
-                raise BlenderError("timeout_seconds and memory_limit_gb must be positive numbers.")
+        timeout = self._number(args.get("timeout_seconds", _RUN_TIMEOUT), "timeout_seconds", 0.1, _RUN_TIMEOUT_MAX)
+        ceiling = self._number(args.get("memory_limit_gb", memory.default_limit_gb()), "memory_limit_gb", 1e-6,
+                               _MAX_MEMORY_GB)
         record = {"script": self._relative(script), "dependencies": [
             {"path": self._relative(item), "sha256": _sha(item), "bytes": item.stat().st_size} for item in files]}
         run = self._start("script", script.read_bytes(), [*(str(item) for item in files), *extra],
-                          timeout=min(float(timeout), _RUN_TIMEOUT_MAX), limit_gb=float(ceiling), extra=record)
+                          timeout=timeout, limit_gb=ceiling, extra=record)
         run.done.wait(self._wait_time(args))
         return self._report(run)
 
@@ -472,8 +570,10 @@ class BlenderTools:
         native = self._existing(args.get("file"), (".blend",))
         cases = args.get("cases")
         if (not isinstance(cases, dict) or not 1 <= len(cases) <= _MAX_CASES
-                or not all(_CASE_NAME.fullmatch(str(key)) and isinstance(value, dict) for key, value in cases.items())):
-            raise BlenderError("cases must map 1 to 12 simple names to {control: value}.")
+                or not all(_CASE_NAME.fullmatch(str(key)) and not _RESERVED_NAME.fullmatch(key)
+                           and isinstance(value, dict) for key, value in cases.items())
+                or len({key.casefold() for key in cases}) != len(cases)):
+            raise BlenderError("cases must map 1 to 12 distinct simple names to {control: value}.")
         if not isinstance(args.get("object"), str) or not args["object"]:
             raise BlenderError("Name the object that carries the Geometry Nodes modifier.")
         return self._step("vary", {"object": args["object"], "cases": cases}, args, inputs=(native,))

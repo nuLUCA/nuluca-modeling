@@ -2,12 +2,14 @@
 
 import ast
 import asyncio
+import base64
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -33,6 +35,7 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 env > "$PWD/child-env.txt"
+if [ -f "$NULUCA_BLENDER_WORK_ROOT/fake-action" ]; then . "$NULUCA_BLENDER_WORK_ROOT/fake-action"; fi
 if [ -n "$(cat "$PWD/fake-sleep" 2>/dev/null)" ]; then sleep "$(cat "$PWD/fake-sleep")"; fi
 exit 0
 """
@@ -95,7 +98,7 @@ def test_mac_app_bundle_resolves_to_its_binary(tmp_path):
 
 def test_mac_candidates_cover_versioned_apps_steam_and_spotlight(tmp_path):
     (tmp_path / "Applications" / "Blender 5.2.app").mkdir(parents=True)
-    found = discovery.candidates("Darwin", {}, tmp_path, which=lambda _: None,
+    found = discovery.candidates("Darwin", {"PATH": ""}, tmp_path,
                                  spotlight=lambda: ["/Volumes/Tools/Blender.app"], registry=lambda: [])
     names = {str(path): source for path, source in found}
     assert names[str(tmp_path / "Applications" / "Blender 5.2.app")] == "applications"
@@ -105,15 +108,34 @@ def test_mac_candidates_cover_versioned_apps_steam_and_spotlight(tmp_path):
 
 def test_windows_candidates_cover_program_files_steam_registry_and_store(tmp_path):
     (tmp_path / "pf" / "Blender Foundation" / "Blender 5.2").mkdir(parents=True)
-    env = {"ProgramFiles": str(tmp_path / "pf"), "LOCALAPPDATA": str(tmp_path / "local")}
+    env = {"PROGRAMFILES": str(tmp_path / "pf"), "LOCALAPPDATA": str(tmp_path / "local"), "PATH": ""}
     launcher = tmp_path / "reg" / "blender-launcher.exe"
-    found = discovery.candidates("Windows", env, tmp_path, which=lambda _: None, spotlight=lambda: [],
+    found = discovery.candidates("Windows", env, tmp_path, spotlight=lambda: [],
                                  registry=lambda: [f'"{launcher}" "%1"'])
     paths = {path: source for path, source in found}
     assert paths[tmp_path / "pf" / "Blender Foundation" / "Blender 5.2" / "blender.exe"] == "program files"
     assert paths[tmp_path / "reg" / "blender.exe"] == "file association"
     assert paths[tmp_path / "local" / "Microsoft/WindowsApps/blender.exe"] == "microsoft store"
     assert any(source == "steam" for source in paths.values())
+
+
+def test_a_relative_path_entry_is_never_searched(tmp_path, monkeypatch):
+    (tmp_path / "blender").write_text("")
+    monkeypatch.chdir(tmp_path)
+    found = discovery.candidates("Linux", {"PATH": ".:relative"}, tmp_path, spotlight=lambda: [], registry=lambda: [])
+    assert not any(source == "path" for _path, source in found)
+
+
+def test_a_symlinked_blender_runs_from_its_real_location(tmp_path):
+    real = tmp_path / "real" / "blender"
+    real.parent.mkdir()
+    real.write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    seen = []
+    discovery.discover({"NULUCA_BLENDER_PATH": str(link)}, {}, system="Linux", home=tmp_path,
+                       read=lambda path, *_: seen.append(path) or "no")
+    assert seen == [real.resolve()]
 
 
 def _install(version, support="tested"):
@@ -244,6 +266,110 @@ async def test_fixed_mode_refuses_python(tmp_path):
 def test_only_the_run_tool_is_marked_as_code_execution():
     marked = [item["name"] for item in blender_tools({}) if item.get("annotations", {}).get("destructiveHint")]
     assert marked == ["blender_run"]
+
+
+# Files a script can tamper with --------------------------------------------
+
+def action(work: BlenderTools, text: str) -> None:
+    work.root.mkdir(parents=True, exist_ok=True)
+    (work.root / "fake-action").write_text(text)
+
+
+@pytest.fixture
+def canary(tmp_path):
+    path = tmp_path / "member-secret.txt"
+    path.write_text("CANARY-PRIVATE")
+    return path
+
+
+@pytest.mark.asyncio
+@posix_only
+async def test_a_receipt_symlink_cannot_redirect_the_write(tmp_path, canary):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    action(work, f'ln -sf "{canary}" execution.json\n')
+    report = await work.call("blender_run", {"script": write_script(work)})
+    assert canary.read_text() == "CANARY-PRIVATE"
+    receipt = work.root / report["receipt"]
+    assert not receipt.is_symlink() and json.loads(receipt.read_text())["status"] == "process_completed"
+
+
+@pytest.mark.asyncio
+@posix_only
+async def test_log_and_artifact_symlinks_leak_nothing(tmp_path, canary):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    action(work, f'rm process.log; ln -s "{canary}" process.log; ln -s "{canary}" artifacts/leak.txt\n'
+                 f'ln -s "{canary.parent}" artifacts/folder; exit 1\n')
+    report = await work.call("blender_run", {"script": write_script(work)})
+    text = json.dumps(report)
+    assert report["status"] == "process_failed_artifacts_preserved"
+    assert "CANARY" not in text and report["artifacts"] == []
+
+
+@pytest.mark.asyncio
+@posix_only
+async def test_a_forged_result_cannot_return_a_private_file(tmp_path, canary):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    work.root.mkdir(parents=True)
+    (work.root / "a.blend").write_text("x")
+    forged = json.dumps({"images": [{"view": "iso", "file": str(canary)}, {"view": "top", "file": "../../x.png"}]})
+    action(work, f"printf '%s' '{forged}' > artifacts/result.json\n")
+    report = await work.call("blender_preview", {"file": "a.blend"})
+    assert "_images" not in report
+    action(work, f'ln -s "{canary}" artifacts/result.json\n')
+    report = await work.call("blender_capabilities", {})
+    assert report["result"] is None and "CANARY" not in json.dumps(report)
+
+
+@pytest.mark.asyncio
+@posix_only
+async def test_a_finished_result_cannot_be_rewritten_by_a_later_run(tmp_path):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    action(work, """printf '{"ok": true}' > artifacts/result.json\n""")
+    first = await work.call("blender_capabilities", {})
+    (work.root / "blender-runs" / first["run"] / "artifacts" / "result.json").write_text('{"ok": false}')
+    assert (await work.call("blender_status", {"run": first["run"]}))["result"] == {"ok": True}
+
+
+@pytest.mark.asyncio
+@posix_only
+@pytest.mark.parametrize("sabotage", [
+    'touch artifacts/x; chmod 000 artifacts/x\n',
+    'mkfifo peak-rss-bytes.txt\n',
+    'mkfifo artifacts/pipe\n',
+    'rm -rf "$PWD"\n',
+    'mv "$PWD" "$PWD-moved"; ln -s /tmp "$PWD"\n',
+])
+async def test_a_tampered_run_folder_never_wedges_the_server(tmp_path, sabotage):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    action(work, sabotage)
+    report = await asyncio.wait_for(work.call("blender_run", {"script": write_script(work), "wait_seconds": 8}), 15)
+    assert report["status"] == "process_completed", report
+    action(work, "")
+    assert (await work.call("blender_run", {"script": "model.py"}))["status"] == "process_completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments,message", [
+    ({"timeout_seconds": float("nan")}, "timeout_seconds"),
+    ({"memory_limit_gb": float("inf")}, "memory_limit_gb"),
+    ({"wait_seconds": float("nan")}, "wait_seconds"),
+    ({"wait_seconds": True}, "wait_seconds"),
+])
+@posix_only
+async def test_limits_must_be_finite_numbers(tmp_path, arguments, message):
+    work = tools(tmp_path, fake_blender(tmp_path))
+    with pytest.raises(BlenderError, match=message):
+        await work.call("blender_run", {"script": write_script(work), **arguments})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cases", [{"A": {}, "a": {}}, {"CON": {}}, {"../x": {}}, {}])
+async def test_case_names_become_safe_distinct_files(tmp_path, cases):
+    work = BlenderTools(root=tmp_path / "work", env={})
+    work.root.mkdir()
+    (work.root / "a.blend").write_text("x")
+    with pytest.raises(BlenderError, match="distinct simple names"):
+        await work.call("blender_vary", {"file": "a.blend", "object": "M", "cases": cases})
 
 
 # Stopping -----------------------------------------------------------------
@@ -564,6 +690,126 @@ async def test_real_blender_guard_refuses_ordinary_escapes(tmp_path, monkeypatch
     assert set(outcome.values()) == {"refused"}, outcome
     assert (home / "secret.txt").read_text() == "private"
     assert not (home / "planted.txt").exists()
+
+
+GUARD_DETAILS = '''
+import json
+import os
+import shutil
+import signal
+import nuluca_author as author
+
+home = os.environ["NULUCA_BLENDER_MEMBER_HOME"]
+os.path.realpath = lambda path: os.environ["NULUCA_BLENDER_WORK_ROOT"]
+outcome = {}
+
+def attempt(name, action):
+    try:
+        action()
+        outcome[name] = "allowed"
+    except PermissionError:
+        outcome[name] = "refused"
+    except OSError as exc:
+        outcome[name] = type(exc).__name__
+
+attempt("after_rebinding", lambda: open(os.path.join(home, "secret.txt")).read())
+attempt("parent_directory_fd", lambda: os.open(os.path.dirname(home), os.O_RDONLY))
+attempt("signal", lambda: os.kill(os.getppid(), 0))
+attempt("copy", lambda: shutil.copy(os.path.join(home, "secret.txt"), author.artifacts_dir() / "copy.txt"))
+(author.artifacts_dir() / "outcome.json").write_text(json.dumps(outcome))
+'''
+
+
+@needs_blender
+@pytest.mark.asyncio
+async def test_real_blender_guard_details(tmp_path, monkeypatch):
+    home = tmp_path / "member"
+    home.mkdir()
+    (home / "secret.txt").write_text("private")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _: home))
+    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER})
+    await work.call("blender_write", {"file": "details.py", "source": GUARD_DETAILS})
+    report = await work.call("blender_run", {"script": "details.py"})
+    assert report["status"] == "process_completed", report.get("log_tail")
+    outcome = json.loads((work.root / "blender-runs" / report["run"] / "artifacts" / "outcome.json").read_text())
+    assert set(outcome.values()) == {"refused"}, outcome
+
+
+TRICKY_FILES = '''
+import os
+import bpy
+import nuluca_author as author
+
+work = os.environ["NULUCA_BLENDER_WORK_ROOT"]
+home = os.environ["NULUCA_BLENDER_MEMBER_HOME"]
+scene = bpy.context.scene
+bpy.ops.mesh.primitive_cube_add(size=2)
+cube = bpy.context.object
+editor = scene.sequence_editor_create()
+editor.strips.new_effect("red", "COLOR", 1, frame_start=1, length=100).color = (1, 0, 0)
+scene.render.use_sequencer = True
+scene.render.use_border = scene.render.use_crop_to_border = True
+scene.render.border_max_x = scene.render.border_max_y = 0.1
+tree = bpy.data.node_groups.new("Comp", "CompositorNodeTree")
+scene.compositing_node_group = tree
+layers = tree.nodes.new("CompositorNodeRLayers")
+layers.scene = scene
+output = tree.nodes.new("CompositorNodeOutputFile")
+output.directory = home + "/planted"
+output.file_name = "stolen"
+output.file_output_items.new("RGBA", "Image")
+tree.links.new(layers.outputs[0], output.inputs[0])
+scene.render.use_compositing = True
+bpy.ops.wm.save_as_mainfile(filepath=work + "/tricky.blend")
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene = bpy.context.scene
+scene.unit_settings.scale_length = 0.001
+bpy.ops.mesh.primitive_cube_add(size=2)
+cube = bpy.context.object
+target = bpy.data.objects.new("Target", None)
+scene.collection.objects.link(target)
+tree = bpy.data.node_groups.new("Inputs", "GeometryNodeTree")
+tree.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+tree.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+tree.interface.new_socket("Target", in_out="INPUT", socket_type="NodeSocketObject")
+tree.interface.new_socket("Size", in_out="INPUT", socket_type="NodeSocketFloat")
+group_in, group_out = tree.nodes.new("NodeGroupInput"), tree.nodes.new("NodeGroupOutput")
+tree.links.new(group_in.outputs[0], group_out.inputs[0])
+modifier = cube.modifiers.new("Inputs", "NODES")
+modifier.node_group = tree
+author.set_control(cube, "Target", target)
+bpy.ops.wm.save_as_mainfile(filepath=work + "/units.blend")
+'''
+
+
+@needs_blender
+@pytest.mark.asyncio
+async def test_real_blender_handles_saved_scene_settings(tmp_path, monkeypatch):
+    home = tmp_path / "member"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda _: home))
+    work = BlenderTools(root=home / "nuluca" / "work", env={**os.environ, "NULUCA_BLENDER_PATH": REAL_BLENDER})
+    await work.call("blender_write", {"file": "tricky.py", "source": TRICKY_FILES})
+    built = await work.call("blender_run", {"script": "tricky.py"})
+    assert built["status"] == "process_completed", built.get("log_tail")
+
+    shown = await work.call("blender_preview", {"file": "tricky.blend", "width": 200, "height": 120})
+    assert shown["status"] == "process_completed", shown.get("log_tail")
+    png = base64.b64decode(shown["_images"][0])
+    assert struct.unpack(">II", png[16:24]) == (200, 120)
+    assert not (home / "planted").exists() and not list(home.glob("planted*"))
+
+    seen = await work.call("blender_inspect", {"file": "units.blend"})
+    assert seen["status"] == "process_completed", seen.get("log_tail")
+    cube = next(item for item in seen["result"]["objects"] if item["name"] == "Cube")
+    assert {item["name"]: item["value"] for item in cube["controls"]}["Target"] == "Target"
+    assert cube["evaluated"]["bounds"][1][0] == pytest.approx(1.0)
+    assert cube["evaluated"]["bounds_m"][1][0] == pytest.approx(0.001)
+    exported = await work.call("blender_export", {"file": "units.blend", "format": "glb"})
+    assert exported["status"] == "process_completed", exported.get("log_tail")
+    assert exported["result"]["bounds_delta_m"] < 1e-6
+    assert exported["result"]["readback"]["bounds_m"][1][0] == pytest.approx(0.001, abs=1e-6)
 
 
 @needs_blender

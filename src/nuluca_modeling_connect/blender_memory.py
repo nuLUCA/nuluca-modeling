@@ -26,6 +26,8 @@ LIMIT_SHARE_OF_RAM = 0.6
 COMMIT_GATE_DEFAULT = 85.0
 COMMIT_WAIT_DEFAULT = 30.0
 COMMIT_STOP_DEFAULT = 95.0
+# System tools run by absolute path with no inherited environment, so the member's key stays out of them.
+_TOOL_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -82,8 +84,8 @@ def commit_percent() -> float | None:
         return 100.0 * (status.ullTotalPageFile - status.ullAvailPageFile) / status.ullTotalPageFile
     if sys.platform == "darwin":
         try:
-            free = subprocess.run(["sysctl", "-n", "kern.memorystatus_level"], capture_output=True,
-                                  text=True, timeout=5, check=True).stdout
+            free = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], capture_output=True,
+                                  text=True, timeout=5, check=True, env=_TOOL_ENV).stdout
             return 100.0 - float(free)
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
@@ -117,7 +119,8 @@ def process_rss_bytes(pid: int) -> int | None:
     if sys.platform == "win32":
         return None
     try:
-        output = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        output = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                                env=_TOOL_ENV)
         return int(output.stdout.strip()) * 1024 if output.returncode == 0 and output.stdout.strip() else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None

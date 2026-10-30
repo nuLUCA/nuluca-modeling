@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import platform
 import re
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +15,7 @@ _PROBE_SECONDS = 30
 _VERSION = re.compile(r"^Blender (\d+)\.(\d+)(?:\.(\d+))?(?:\s+(.*))?$", re.MULTILINE)
 _BUILD = re.compile(r"build hash:\s*([0-9a-f]+)")
 _APP_ID = 'kMDItemCFBundleIdentifier == "org.blenderfoundation.blender"'
+_TOOL_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,8 @@ def _install_root(binary: Path, system: str) -> Path:
 
 def _spotlight() -> list[str]:
     try:
-        result = subprocess.run(["mdfind", _APP_ID], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["/usr/bin/mdfind", _APP_ID], capture_output=True, text=True, timeout=5,
+                                env=_TOOL_ENV)
     except (OSError, subprocess.SubprocessError):
         return []
     return [line for line in result.stdout.splitlines() if line.endswith(".app")]
@@ -79,13 +80,24 @@ def _from_open_command(command: str) -> Path | None:
     return launcher.with_name("blender.exe")
 
 
-def candidates(system: str, env: dict, home: Path, *, which=shutil.which, spotlight=_spotlight,
+def _on_path(env: dict, system: str) -> Path | None:
+    """Absolute PATH entries only. Windows' own search would also try the working directory."""
+    name = "blender.exe" if system == "Windows" else "blender"
+    separator = ";" if system == "Windows" else ":"
+    for entry in env.get("PATH", "").split(separator):
+        if entry and Path(entry).is_absolute() and (Path(entry) / name).is_file():
+            return Path(entry) / name
+    return None
+
+
+def candidates(system: str, env: dict, home: Path, *, spotlight=_spotlight,
                registry=_registry) -> list[tuple[Path, str]]:
     """Likely locations, most specific first. Paths that do not exist are dropped by the caller."""
+    env = {key.upper(): value for key, value in env.items()}
     found: list[tuple[Path, str]] = []
-    on_path = which("blender")
+    on_path = _on_path(env, system)
     if on_path:
-        found.append((Path(on_path), "path"))
+        found.append((on_path, "path"))
     if system == "Darwin":
         for root in (Path("/Applications"), home / "Applications"):
             found += [(item, "applications") for item in sorted(root.glob("Blender*.app"), reverse=True)]
@@ -93,7 +105,7 @@ def candidates(system: str, env: dict, home: Path, *, which=shutil.which, spotli
         found += [(Path(item), "spotlight") for item in spotlight()]
         found += [(Path("/opt/homebrew/bin/blender"), "homebrew"), (Path("/usr/local/bin/blender"), "homebrew")]
     elif system == "Windows":
-        roots = [env.get(key) for key in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)")]
+        roots = [env.get(key) for key in ("PROGRAMW6432", "PROGRAMFILES", "PROGRAMFILES(X86)")]
         local = env.get("LOCALAPPDATA")
         for root in [*roots, str(Path(local) / "Programs") if local else None]:
             if root:
@@ -160,7 +172,9 @@ def discover(env: dict, probe_env: dict, *, system: str | None = None, home: Pat
             if named:
                 rejected.append({"path": str(path), "source": source, "reason": "no Blender executable there"})
             continue
-        key = os.path.normcase(str(binary.resolve()))
+        # Blender finds its Python beside the real binary, so a symlink has to be followed first.
+        binary = binary.resolve()
+        key = os.path.normcase(str(binary))
         if key in seen:
             continue
         seen.add(key)

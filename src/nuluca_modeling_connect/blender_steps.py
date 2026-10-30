@@ -16,7 +16,7 @@ from pathlib import Path
 
 import bmesh
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 import nuluca_author as author
 
@@ -167,15 +167,27 @@ def _stl(path, record):
 def _obj(path, record):
     bpy.ops.wm.obj_export(filepath=str(path), export_selected_objects=True, apply_modifiers=True,
                           export_materials=False)
-    record["keeps"] = ["evaluated mesh", "object names"]
+    record["keeps"] = ["evaluated mesh in Blender units", "object names"]
     record["loses"] = ["materials", "controls"]
 
 
 _EXPORTERS = {"glb": _gltf, "usd": _usd, "stl": _stl, "obj": _obj}
 
 
+def _scale_to_metres(chosen):
+    """glTF is in metres and the exporter ignores the unit scale. This changes the open scene only."""
+    scale = bpy.context.scene.unit_settings.scale_length
+    if scale == 1:
+        return
+    bpy.context.view_layer.update()
+    for obj in chosen:
+        if obj.parent not in chosen:
+            obj.matrix_world = Matrix.Scale(scale, 4) @ obj.matrix_world
+
+
 def _readback(path):
     """Import a GLB into the emptied scene. The source file on disk is untouched."""
+    bpy.context.scene.unit_settings.scale_length = 1
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     started = time.perf_counter()
@@ -201,6 +213,8 @@ def export(request, out):
             author.set_control(obj, "Realize for export", True)
             realized.append(obj.name)
     state = author.measure(chosen)
+    if kind == "glb":
+        _scale_to_metres(chosen)
     path = out / f"{native.stem}.{kind}"
     record = {"format": kind, "source_sha256": sha(native), "realized_for_export": realized,
               "exported_objects": [obj.name for obj in chosen], "evaluated": state}
@@ -244,6 +258,9 @@ def preview(request, out):
     scene.render.resolution_x, scene.render.resolution_y = width, height
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
+    # A saved file can carry compositor outputs, a sequencer edit or a render border. None belong in a review view.
+    scene.render.use_compositing = scene.render.use_sequencer = False
+    scene.render.use_border = scene.render.use_crop_to_border = False
     shading = scene.display.shading
     shading.light, shading.color_type = "STUDIO", "MATERIAL"
     shading.show_shadows, shading.show_cavity = True, True
@@ -285,13 +302,17 @@ def main():
     except Exception as exc:
         (out / "result.json").write_text(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
         raise
-    (out / "result.json").write_text(json.dumps(result, indent=2, default=_plain, allow_nan=False))
+    (out / "result.json").write_text(json.dumps(_finite(result), indent=2, default=str, allow_nan=False))
 
 
-def _plain(value):
+def _finite(value):
     if isinstance(value, float) and not math.isfinite(value):
         return None
-    return str(value)
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(item) for item in value]
+    return value
 
 
 main()

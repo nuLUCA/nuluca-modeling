@@ -36,11 +36,22 @@ def gn_controls(obj):
         for field in ("min_value", "max_value", "default_value"):
             value = getattr(item, field, None)
             if value is not None:
-                entry[field] = value if isinstance(value, (int, float, bool, str)) else list(value)
-        value = _read(modifier, item.identifier)
-        entry["value"] = value if isinstance(value, (int, float, bool, str)) or value is None else list(value)
+                entry[field] = _plain(value)
+        entry["value"] = _plain(_read(modifier, item.identifier))
         controls.append(entry)
     return controls
+
+
+def _plain(value):
+    """A value JSON can hold. Object, material and collection inputs report their name."""
+    if value is None or isinstance(value, (int, float, bool, str)):
+        return value
+    if isinstance(value, bpy.types.ID):
+        return value.name
+    try:
+        return list(value)
+    except TypeError:
+        return str(value)
 
 
 def _inputs(modifier):
@@ -77,7 +88,10 @@ def rendered_objects():
 
 
 def measure(objects=None):
-    """Evaluated counts, world bounds and an instance-transform digest for one object, a list or the whole scene."""
+    """Evaluated counts, bounds and an instance-transform digest for one object, a list or the whole scene.
+
+    ``bounds`` is in Blender units. ``bounds_m`` applies the scene's unit scale.
+    """
     wanted = None if objects is None else set(objects) if isinstance(objects, (list, tuple, set)) else {objects}
     bpy.context.view_layer.update()
     graph = bpy.context.evaluated_depsgraph_get()
@@ -108,8 +122,10 @@ def measure(objects=None):
         world = points[key] @ matrix[:3, :3].T + matrix[:3, 3]
         low, high = np.minimum(low, world.min(0)), np.maximum(high, world.max(0))
     finite = bool(vertices) and bool(np.isfinite(low).all() and np.isfinite(high).all())
+    scale = bpy.context.scene.unit_settings.scale_length
     return {"instance_count": int(instances), "expanded_vertices": vertices, "expanded_polygons": polygons,
-            "expanded_triangles": triangles, "bounds_m": [low.tolist(), high.tolist()] if finite else None,
+            "expanded_triangles": triangles, "bounds": [low.tolist(), high.tolist()] if finite else None,
+            "bounds_m": [(low * scale).tolist(), (high * scale).tolist()] if finite else None,
             "transform_sha256": digest.hexdigest()}
 
 
