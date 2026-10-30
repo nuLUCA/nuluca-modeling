@@ -15,6 +15,7 @@ _READ = {
     "canvas_errors": "/errors",
     "canvas_solution_state": "/solution-state",
     "canvas_get_values": "/get-values",
+    "canvas_plugins": "/plugins",
     "dialogs_list": "/dialogs",
     "viewport_zoom_extents": "/zoom-extents",
 }
@@ -31,18 +32,34 @@ _WRITE = {
     "viewport_set_display_mode": "/set-display-mode",
     "dialog_dismiss": "/dismiss-dialog",
 }
-_FILE = {"canvas_import", "canvas_export", "canvas_save", "viewport_screenshot"}
+_FILE = {"canvas_preflight", "canvas_import", "canvas_export", "canvas_save", "viewport_screenshot"}
 _REQUIRED = {
     "canvas_set_slider": {"nickname": "string", "value": "number"},
     "canvas_set_panel": {"nickname": "string", "value": "string"},
     "canvas_enable": {"nickname": "string", "enabled": "boolean"},
     "canvas_set_preview": {"nickname": "string", "preview": "boolean"},
+    "canvas_preflight": {"file": "string"},
     "canvas_import": {"file": "string"},
     "canvas_export": {"file": "string"},
     "canvas_save": {"file": "string"},
     "viewport_screenshot": {"file": "string"},
     "viewport_set_display_mode": {"mode": "string"},
 }
+_OPTIONAL = {
+    "canvas_import": {
+        "replace_canvas": {"type": "boolean", "description": "Clear a canvas that has objects on it. Set this only after the member agrees."},
+        "add_to_canvas": {"type": "boolean", "description": "Keep the objects on the canvas and add this definition to them."},
+    },
+}
+_DESCRIPTIONS = {
+    "canvas_plugins": "List the third-party Grasshopper plugins installed on the member's machine.",
+    "canvas_preflight": "Check which plugins a local definition needs and which are missing, before canvas_import. Changes nothing.",
+    "canvas_import": ("Import a local definition onto the Rhino canvas. If the canvas has objects, this returns "
+                      "canvas_not_empty and changes nothing; ask the member, then repeat with replace_canvas or add_to_canvas."),
+}
+_NOT_EMPTY = ("The canvas has objects on it, and importing would clear them. Ask the member, then repeat with "
+              "replace_canvas true to clear them, or add_to_canvas true to keep them. Nothing has changed.")
+_NEEDS_UPDATE = "This plugin cannot check definitions yet. Run setup again to update it, or use canvas_import."
 
 
 def local_tools() -> list[dict]:
@@ -51,9 +68,9 @@ def local_tools() -> list[dict]:
         fields = _REQUIRED.get(name, {})
         tools.append({
             "name": name,
-            "description": name.replace("_", " ").capitalize() + " on the local Rhino canvas.",
+            "description": _DESCRIPTIONS.get(name, name.replace("_", " ").capitalize() + " on the local Rhino canvas."),
             "inputSchema": {"type": "object", "properties": {
-                key: {"type": kind} for key, kind in fields.items()
+                **{key: {"type": kind} for key, kind in fields.items()}, **_OPTIONAL.get(name, {}),
             }, "required": list(fields), "additionalProperties": True},
         })
     return tools
@@ -72,6 +89,26 @@ class LocalTools:
             raise BridgeError("The file must stay inside the modeling work directory.")
         return path
 
+    def _definition(self, value: object) -> dict:
+        path = self._file(value, ".json")
+        if not path.is_file() or path.stat().st_size > 512 * 1024:
+            raise BridgeError("The definition file is missing or too large.")
+        try:
+            definition = json.loads(path.read_text())
+        except ValueError as exc:
+            raise BridgeError("The definition file is invalid JSON.") from exc
+        if not isinstance(definition, dict):
+            raise BridgeError("The definition must be a JSON object.")
+        return definition
+
+    async def _preflight(self, definition: dict) -> dict:
+        try:
+            return await self.bridge.call("POST", "/preflight", body=definition)
+        except BridgeError as exc:
+            if "(404)" in str(exc):
+                return {"success": False, "error": "preflight_unavailable", "message": _NEEDS_UPDATE}
+            raise
+
     async def call(self, name: str, args: dict) -> dict:
         if not isinstance(args, dict):
             raise BridgeError("Tool arguments must be an object.")
@@ -79,18 +116,19 @@ class LocalTools:
             return await self.bridge.call("GET", _READ[name])
         if name in _WRITE:
             return await self.bridge.call("POST", _WRITE[name], body=args)
-        if name == "canvas_import":
-            path = self._file(args.get("file"), ".json")
-            if not path.is_file() or path.stat().st_size > 512 * 1024:
-                raise BridgeError("The definition file is missing or too large.")
-            try:
-                definition = json.loads(path.read_text())
-            except ValueError as exc:
-                raise BridgeError("The definition file is invalid JSON.") from exc
-            if not isinstance(definition, dict):
-                raise BridgeError("The definition must be a JSON object.")
+        if name in {"canvas_import", "canvas_preflight"}:
+            definition = self._definition(args.get("file"))
+            if name == "canvas_preflight":
+                return await self._preflight(definition)
+            add = args.get("add_to_canvas") is True
+            if not add and args.get("replace_canvas") is not True:
+                status = await self.bridge.call("GET", "/status")
+                objects = int(status.get("component_count") or 0) + int(status.get("parameter_count") or 0)
+                if objects:
+                    return {"success": False, "warning": "canvas_not_empty", "object_count": objects,
+                            "message": _NOT_EMPTY}
             return await self.bridge.call("POST", "/import", body=definition,
-                                          query={"clear": "true"})
+                                          query={"clear": "false" if add else "true"})
         if name == "canvas_export":
             path = self._file(args.get("file"), ".json")
             result = await self.bridge.call("GET", "/export")

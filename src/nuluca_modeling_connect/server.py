@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from importlib.metadata import version
 
 from mcp.server import Server
@@ -15,7 +16,7 @@ from mcp.types import TextContent, Tool
 from .bridge import BridgeError
 from .client import CloudClient, ConnectError
 from .local import LocalTools, local_tools
-from .setup import SetupError, SetupOptions, setup, uninstall
+from .setup import CONFIGURED_CLIENTS, OTHER_CLIENT, SERVICES, SetupError, SetupOptions, detected_clients, setup, uninstall
 from .workbench import Workbench, workbench_tools
 
 
@@ -79,7 +80,11 @@ def main() -> None:
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--plugin-source", help="Local plugin ZIP or HTTPS URL")
     parser.add_argument("--checksums-source", help="Local or HTTPS SHA256SUMS (defaults beside the ZIP)")
-    parser.add_argument("--client", action="append", choices=["claude", "codex"], dest="clients")
+    parser.add_argument("--client", action="append", choices=[*CONFIGURED_CLIENTS, OTHER_CLIENT], dest="clients",
+                        help="Client to configure. Use other for any different MCP client: setup prints its entry")
+    parser.add_argument("--environment", choices=list(SERVICES),
+                        help="nuLUCA service to use (default production, or NULUCA_AGENT_CONNECT_URL)")
+    parser.add_argument("--package-spec", help="Package path or URL the client should start instead of PyPI")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
@@ -93,10 +98,12 @@ def main() -> None:
             else:
                 key = os.environ.get("NULUCA_AGENT_CONNECT_KEY", "")
                 result = setup(SetupOptions(source=args.plugin_source, checksums=args.checksums_source,
-                                            key=key, clients=tuple(args.clients or ("claude", "codex")),
-                                            dry_run=args.dry_run))
-        except SetupError as exc:
-            parser.error(str(exc))
+                                            key=key, clients=tuple(args.clients or detected_clients()),
+                                            dry_run=args.dry_run, environment=args.environment,
+                                            package_spec=args.package_spec))
+        except (SetupError, OSError) as exc:
+            print(f"nuluca-modeling setup: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(json.dumps(result, indent=2))
         return
     asyncio.run(_run())

@@ -23,9 +23,11 @@ def release(tmp_path):
     return archive
 
 
-def home(monkeypatch, tmp_path):
+def home(monkeypatch, tmp_path, *, tools=("uvx",)):
     monkeypatch.setattr(installer, "_home", lambda: tmp_path / "home")
     monkeypatch.setattr(installer, "_libraries_dir", lambda: tmp_path / "libraries")
+    monkeypatch.setattr(installer, "version", lambda name: "9.8.7")
+    monkeypatch.setattr(installer.shutil, "which", lambda name: f"/opt/bin/{name}" if name in tools else None)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home" / ".codex"))
     monkeypatch.delenv("NULUCA_AGENT_CONNECT_URL", raising=False)
 
@@ -36,7 +38,9 @@ def test_setup_upgrades_clients_without_printing_key_and_uninstall_removes_owned
     options = installer.SetupOptions(str(archive), None, "ae_test_secret", ("claude", "codex"))
     result = installer.setup(options)
 
-    assert result["restart"] == "Restart Rhino, then call nuluca_status."
+    assert "restart Rhino themselves" in result["restart"]
+    assert "Never quit, kill or relaunch" in result["restart"]
+    assert "nuluca_status" in result["restart"]
     assert (tmp_path / "libraries" / "JsonToGH_Fresh.gha").read_bytes() == b"plugin"
     claude = json.loads((tmp_path / "home" / ".claude.json").read_text())
     assert claude["mcpServers"]["nuluca-modeling"]["env"]["NULUCA_AGENT_CONNECT_KEY"] == "ae_test_secret"
@@ -140,3 +144,176 @@ def test_setup_rejects_unsafe_service_before_download_or_config_changes(tmp_path
     with pytest.raises(installer.SetupError, match="setup service"):
         installer.setup(installer.SetupOptions(None, None, "ae_test_secret", ("claude", "codex")))
     assert not (tmp_path / "home").exists()
+
+
+def test_mac_install_goes_to_the_folder_grasshopper_loads(monkeypatch, tmp_path):
+    monkeypatch.setattr(installer, "_home", lambda: tmp_path)
+    monkeypatch.setattr(installer.os, "name", "posix")
+    assert installer._libraries_dir() == (
+        tmp_path / "Library/Application Support/McNeel/Rhinoceros/8.0/Plug-ins"
+        / "Grasshopper (b45a29b1-4343-4035-989e-044e8580d9cf)/Libraries")
+
+
+def test_setup_moves_a_plugin_left_in_the_old_mac_folder(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    stale = tmp_path / "home/Library/Application Support/Grasshopper/Libraries/JsonToGH_Fresh.gha"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"old")
+    state = tmp_path / "home/.nuluca-modeling-connect/setup-state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"plugin_paths": {"JsonToGH_Fresh.gha": str(stale)}, "plugin_restore": {}, "clients": []}))
+    monkeypatch.setattr(installer.os, "name", "posix")
+
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+
+    assert not stale.exists()
+    assert (tmp_path / "libraries" / "JsonToGH_Fresh.gha").read_bytes() == b"plugin"
+
+
+def test_saved_client_entry_survives_the_uvx_process_that_ran_setup(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude", "codex")))
+
+    entry = json.loads((tmp_path / "home" / ".claude.json").read_text())["mcpServers"]["nuluca-modeling"]
+    assert entry["command"] == "/opt/bin/uvx"
+    assert entry["args"] == ["nuluca-modeling@9.8.7", "serve"]
+    codex = (tmp_path / "home" / ".codex" / "config.toml").read_text()
+    assert 'command = "/opt/bin/uvx"' in codex
+    assert 'args = ["nuluca-modeling@9.8.7", "serve"]' in codex
+
+
+def test_client_entry_can_name_a_package_before_it_is_on_pypi(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("claude",),
+                                           package_spec="/tmp/nuluca_modeling.whl"))
+    entry = json.loads((tmp_path / "home" / ".claude.json").read_text())["mcpServers"]["nuluca-modeling"]
+    assert entry["args"] == ["--from", "/tmp/nuluca_modeling.whl", "nuluca-modeling", "serve"]
+
+
+def test_installed_command_is_used_without_uvx_and_absence_is_explained(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path, tools=("nuluca-modeling",))
+    archive = release(tmp_path)
+    installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("claude",)))
+    entry = json.loads((tmp_path / "home" / ".claude.json").read_text())["mcpServers"]["nuluca-modeling"]
+    assert (entry["command"], entry["args"]) == ("/opt/bin/nuluca-modeling", ["serve"])
+
+    home(monkeypatch, tmp_path, tools=())
+    with pytest.raises(installer.SetupError, match="Install uv"):
+        installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("claude",)))
+
+
+def test_named_environment_wins_and_production_is_only_a_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("NULUCA_AGENT_CONNECT_URL", "https://example.test")
+    assert installer._service_url("staging") == "https://nuluca-backend-staging.up.railway.app"
+    assert installer._service_url("production") == "https://nuluca-backend-production.up.railway.app"
+    assert installer._service_url() == "https://example.test"
+    with pytest.raises(installer.SetupError):
+        installer._service_url("qa")
+
+
+@pytest.mark.parametrize("status, expected", [(404, "does not offer"), (403, "Modeling key"), (401, "Modeling key")])
+def test_download_refusal_says_what_to_do_without_the_key(monkeypatch, status, expected):
+    client_type = httpx.Client
+    monkeypatch.setattr(installer.httpx, "Client", lambda **kwargs: client_type(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status)), **kwargs))
+    with pytest.raises(installer.SetupError, match=expected) as caught:
+        installer._member_release("ae_test_secret", base_url="https://example.test")
+    assert "ae_test_secret" not in str(caught.value)
+
+
+def test_shared_newtonsoft_is_left_alone_on_install_rerun_and_uninstall(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = release(tmp_path)
+    shared = tmp_path / "libraries" / "Newtonsoft.Json.dll"
+    shared.parent.mkdir()
+    shared.write_bytes(b"another-plugin-copy")
+    options = installer.SetupOptions(str(archive), None, "ae_test_secret", ("codex",))
+
+    first = installer.setup(options)
+    second = installer.setup(options)
+
+    assert shared.read_bytes() == b"another-plugin-copy"
+    assert "Newtonsoft.Json.dll" not in first["plugin"]
+    assert any("Newtonsoft.Json.dll" in note for note in second["notes"])
+    assert not (tmp_path / "home/.nuluca-modeling-connect/plugin-backups/Newtonsoft.Json.dll").exists()
+    installer.uninstall()
+    assert shared.read_bytes() == b"another-plugin-copy"
+
+
+def test_newtonsoft_setup_added_is_removed_with_the_plugin(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+    assert (tmp_path / "libraries" / "Newtonsoft.Json.dll").read_bytes() == b"dependency"
+    installer.uninstall()
+    assert not (tmp_path / "libraries" / "Newtonsoft.Json.dll").exists()
+
+
+def test_rerun_rewrites_nothing_in_libraries(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    options = installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",))
+    installer.setup(options)
+    monkeypatch.setattr(installer, "_replace_file", lambda *args: pytest.fail("rewrote an unchanged file"))
+    installer.setup(options)
+
+
+def test_setup_does_not_change_permissions_on_the_shared_libraries_folder(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    libraries = tmp_path / "libraries"
+    libraries.mkdir()
+    libraries.chmod(0o755)
+    installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("codex",)))
+    assert libraries.stat().st_mode & 0o777 == 0o755
+
+
+def test_upgrade_while_rhino_holds_the_plugin_gives_a_readable_error(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = release(tmp_path)
+    installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("codex",)))
+    library = tmp_path / "libraries" / "JsonToGH_Fresh.gha"
+    library.write_bytes(b"older-loaded-plugin")
+
+    def locked(source, destination):
+        raise PermissionError(13, "The process cannot access the file", str(destination))
+
+    monkeypatch.setattr(installer.os, "replace", locked)
+    with pytest.raises(installer.SetupError, match="close Rhino") as caught:
+        installer.setup(installer.SetupOptions(str(archive), None, "ae_test_secret", ("codex",)))
+    assert "13" not in str(caught.value)
+    assert library.read_bytes() == b"older-loaded-plugin"
+    assert sorted(path.name for path in library.parent.iterdir()) == ["JsonToGH_Fresh.gha", "Newtonsoft.Json.dll"]
+
+
+def test_other_client_changes_no_client_file_and_gets_a_keyless_entry(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    result = installer.setup(installer.SetupOptions(str(release(tmp_path)), None, "ae_test_secret", ("other",)))
+
+    assert result["clients"] == {}
+    assert result["manual_client_entry"]["command"] == "/opt/bin/uvx"
+    assert result["manual_client_entry"]["args"] == ["nuluca-modeling@9.8.7", "serve"]
+    assert "ae_test_secret" not in json.dumps(result)
+    assert not (tmp_path / "home" / ".claude.json").exists()
+    assert not (tmp_path / "home" / ".codex" / "config.toml").exists()
+    installer.uninstall()
+
+
+def test_default_clients_follow_what_is_installed(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path, tools=("codex",))
+    assert installer.detected_clients() == ("codex",)
+    home(monkeypatch, tmp_path, tools=())
+    assert installer.detected_clients() == ("other",)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / ".claude.json").write_text("{}")
+    assert installer.detected_clients() == ("claude",)
+
+
+def test_archive_may_carry_third_party_notices(tmp_path, monkeypatch):
+    home(monkeypatch, tmp_path)
+    archive = tmp_path / "with-notices.zip"
+    plugin = {"JsonToGH_Fresh.gha": b"plugin", "Newtonsoft.Json.dll": b"dependency"}
+    with zipfile.ZipFile(archive, "w") as packed:
+        for name, content in plugin.items():
+            packed.writestr(name, content)
+        packed.writestr("THIRD-PARTY-NOTICES.txt", "Newtonsoft.Json MIT")
+        packed.writestr("SHA256SUMS", "".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in plugin.items()))
+    assert set(installer._safe_archive(archive.read_bytes(), hashlib.sha256(archive.read_bytes()).hexdigest())) == set(plugin)
